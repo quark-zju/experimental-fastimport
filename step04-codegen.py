@@ -282,30 +282,32 @@ for name in modnames:
 
 print('serializing')
 
-
-
-# Patching
-
-import ctypes, ctypes._endian
-del ctypes.memmove
-del ctypes.memset
-del ctypes._cast
-del ctypes._string_at
-del ctypes._wstring_at
-del ctypes.pythonapi
-ctypes._c_functype_cache.clear()
-del ctypes._endian.memmove
-del ctypes._endian.memset
-del ctypes._endian.pythonapi
-del ctypes._endian.BigEndianStructure
-del ctypes._endian.LittleEndianStructure
-del ctypes._endian.Structure
-del ctypes.BigEndianStructure
-del ctypes.LittleEndianStructure
+import ctypes, ctypes._endian, os, sys
+import atexit
 # import uuid - uuid is no longer used
 # uuid._UuidCreate = None
 # uuid._uuid_generate_time = None
 # uuid.lib = None
+db = c.DynamicBuffer(
+    evalcode=[
+        '[sys, sys.stdin, sys.stdout, sys.stderr, sys.modules, os]',
+        # native modules
+        "__import__('_ctypes').__dict__.values()",
+        "__import__('_collections').__dict__.values()",
+    ],
+    replaces=[
+        (ctypes.memmove, None),
+        (ctypes.memset, None),
+        (ctypes._cast, None),
+        (ctypes._string_at, None),
+        (ctypes._wstring_at, None),
+        (ctypes.pythonapi, None),
+        (ctypes._endian.BigEndianStructure, None),
+        (ctypes._endian.LittleEndianStructure, None),
+        (ctypes._c_functype_cache, {}),
+        (atexit._exithandlers, []),
+    ],
+)
 
 # Whitelist bser.so
 c.PyModuleWriter.WHITELIST.add("bser.so")
@@ -314,12 +316,12 @@ c.PyModuleWriter.WHITELIST.add("bser.so")
 #import ipdb
 # ipdb has side effect on __builtins__
 # with ipdb.launch_ipdb_on_exception():
-dump(d)
+dump(d, dbuf=db)
 
 
 print('generating code')
-codegen()
+codegen(dbuf=db)
 
-v = load(pos)
+v = load(pos, dbuf=db)
 
 __import__('IPython').embed()

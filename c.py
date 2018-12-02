@@ -391,7 +391,7 @@ class DynamicBuffer(object):
 
     LIBPYTHON_NAME = dladdr(id(None))[0]
 
-    def __init__(self, evalcode=(), nullify=()):
+    def __init__(self, evalcode=(), replaces=()):
         self._evalcode = list(evalcode)
 
         # 3 special values in evalvalues
@@ -413,23 +413,23 @@ class DynamicBuffer(object):
         symbolmap = {}
         for i, val in enumerate(evalvalues):
             symbolmap[id(val)] = i
+        self._symbolmap = symbolmap
 
         # Handle "nullify". Also make sure this object itself (and the module)
         # are nullified to avoid trouble!
-        for obj in list(nullify) + [
-            _cffi_backend,
-            cpyffi,
-            dlfcn,
-            ffi,
-            globals(),
-            lib,
-            self,
-            self.__dict__,
-            type(self),
-        ]:
-            if id(obj) not in symbolmap:
-                symbolmap[id(obj)] = noneindex
-        self._symbolmap = symbolmap
+        repalces = list(replaces[:]) + [
+            (_cffi_backend, None),
+            (cpyffi, None),
+            (dlfcn, None),
+            (ffi, None),
+            (globals(), {}),
+            (lib, None),
+            (self, None),
+            (self.__dict__, {}),
+            (type(self), None),
+        ]
+        # Object ID -> Object
+        self.replacemap = {id(k): v for k, v in replaces}
 
         # Main buffer
         self._buf = bytearray(b'__DBUF_START_MARK__')
@@ -523,6 +523,14 @@ class DynamicBuffer(object):
         else:
             self._appendbufoffsets(offset)
         return base
+
+    def replaceptr(self, ptr):
+        """Replace ptr with a user-defined replacement"""
+        pint = ptrint(ptr)
+        if pint in self.replacemap:
+            return toptr(self.replacemap[pint])
+        else:
+            return ptr
 
     def hasptr(self, ptr, checkptrmap=True, checksymbolmap=True, checklibpython=True):
         """Test if a pointer is known"""
@@ -698,6 +706,8 @@ class DynamicBuffer(object):
         except ValueError:
             dlindex = len(self._dlnames)
             self._dlnames.append(dlpath)
+            if 'cffi_backend' in dlpath:
+                    import IPython; IPython.embed()
         self._dloffsetset.add(offset)
         self._dloffsets.append((offset, dlindex))
 
@@ -2587,6 +2597,9 @@ def cloneptr(dst, src, wtype=None, wargs=None, inline=False, realloc=False):
     else:
         raise TypeError("dst must be BufferPointer or DynamicBuffer")
 
+    # Replace it on demand?
+    src = dbuf.replaceptr(src)
+
     # Prepare writer
     if wtype is None:
         # Auto-detect writer type
@@ -2826,9 +2839,16 @@ def codegen(dbuf=None, objoffset=None, modname="preload", mmapat=0x2d0000000):
 #include <sys/types.h>
 #include <unistd.h>
 
+#define error(...) (PyErr_Format(PyExc_RuntimeError, __VA_ARGS__),-1)
+#define debug(...) if (debugenabled) { \
+    fprintf(stderr, "[%(modname)s][%%4.6f] ", now() - debugstarted); \
+    fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); \
+    fflush(stderr); }
+#define len(X) (sizeof(X) / sizeof((X)[0]))
+#define BUFATTR __attribute__((section ("MAINBUF")))
+
 // The extra 8192 bytes makes it possible to move buf around.
-static uint8_t buf[%(bufsize)s + 8192] = %(buf)s;
-static size_t dlbases[%(dlcount)d] = { 0 };
+static uint8_t buf[%(bufsize)s + 8192] BUFATTR = %(buf)s;
 
 static const size_t bufoffsets[] = { %(bufoffsets)s };
 static const char *dlpathsyms[%(dlcount)d][2] = { %(dlpathsyms)s };
@@ -2864,12 +2884,7 @@ const size_t PATCH_ID_IS_PATCHED = 0;
 const size_t PATCH_ID_MOVED_OFFSET = 1;
 const size_t PATCH_ID_OFFSET_IN_FILE = 2;
 
-#define error(...) (PyErr_Format(PyExc_RuntimeError, __VA_ARGS__),-1)
-#define debug(...) if (debugenabled) { \
-    fprintf(stderr, "[%(modname)s][%%4.6f] ", now() - debugstarted); \
-    fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); \
-    fflush(stderr); }
-#define len(X) (sizeof(X) / sizeof((X)[0]))
+static size_t dlbases[%(dlcount)d] = { 0 };
 
 /// Check if ABI compatible. Return 0 on success.
 static int check() {
@@ -2884,6 +2899,7 @@ static int check() {
 /// Enable debug?
 static int debugenabled = 0;
 static double debugstarted = 0;
+static int mmapenabled = 1;
 
 // Timestamp if debug is enabled.
 static double now() {
@@ -2932,7 +2948,7 @@ static int remapbuf() {
   // Try mmap at the desired address.
   size_t fileoffset = readpatch(PATCH_ID_OFFSET_IN_FILE);
   uint8_t *p = (uint8_t *)mmap(mmapat, bufsize,
-    PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_POPULATE, fd, fileoffset);
+    PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, fileoffset);
   close(fd);
   if (p == MAP_FAILED) {
     debug("remapbuf: mmap failed (errno = %%d)", errno);
@@ -3036,11 +3052,8 @@ static int relocate() {
   // buf[] will be modified so retry this function won't work.
   ready = 2;
 
-  // Try remap buf (if enabled)!
-  int remapped = 0;
-  if (!getenv("DISABLEMMAP")) {
-    remapped = remapbuf();
-  }
+  // Try remap buf if enabled
+  int remapped = mmapenabled && remapbuf();
 
   // Fix pointers to the buffer
   assert(sizeof(size_t) == sizeof(void *));
@@ -3160,12 +3173,23 @@ static PyObject *contains(PyObject *self, PyObject *obj) {
   }
 }
 
+static PyObject *setdebug(PyObject *self, PyObject *obj) {
+  debugenabled = (PyObject_IsTrue(obj));
+  if (debugenabled) debugstarted = now();
+  Py_RETURN_NONE;
+}
+
+static PyObject *setmmap(PyObject *self, PyObject *obj) {
+  mmapenabled = (PyObject_IsTrue(obj));
+  Py_RETURN_NONE;
+}
+
 static PyObject *getrawbuf() {
   return PyString_FromStringAndSize((const char *)buf, (Py_ssize_t)sizeof(buf));
 }
 
 static PyObject *getpatches() {
-PyObject *list = (PyObject *)PyList_New(len(patchbufs));
+  PyObject *list = (PyObject *)PyList_New(len(patchbufs));
   for (size_t i = 0; i < len(patchbufs); ++i) {
     PyObject *item = Py_BuildValue("sK", patchbufs[i], (unsigned long long)readpatch(i));
     if (!item) {
@@ -3181,16 +3205,15 @@ static PyMethodDef methods[] = {
   {"load", load, METH_NOARGS, "Extract the single top-level object"},
   {"modules", modules, METH_NOARGS, "Extract list of modules"},
   {"contains", contains, METH_O, "Test if an object is provided by this module"},
-  {"_rawbuf", getrawbuf, METH_NOARGS, "Get the raw buffer."},
-  {"_patches", getpatches, METH_NOARGS, "Get patched values."},
+  {"setdebug", setdebug, METH_O, "Enable or disable debug prints"},
+  {"setmmap", setmmap, METH_O, "Enable or disable using mmap"},
+  {"_rawbuf", getrawbuf, METH_NOARGS, "Get the raw buffer"},
+  {"_patches", getpatches, METH_NOARGS, "Get patched values"},
   {NULL, NULL}
 };
 
 PyMODINIT_FUNC init%(modname)s(void) {
-  debugenabled = (getenv("%(modnameupper)sDEBUGENABLED") != NULL);
   bufstart = buf + readpatch(PATCH_ID_MOVED_OFFSET);
-  if (debugenabled) debugstarted = now();
-  debug("buf: start at %%p, %%zu bytes", bufstart, bufsize);
   Py_InitModule3("%(modname)s", methods, NULL);
 }
 """
@@ -3237,37 +3260,6 @@ db = DynamicBuffer(
         # # io.py wants a lot from _io
         # "__import__('_io').__dict__.values()",
         "__import__('_collections').__dict__.values()",
-        # "_functools.partial",
-        # "_random.Random",
-        # "_socket.CAPI",
-        # "_socket.socket",
-        # "_ssl.SSLError",
-        # "_ssl._SSLContext",
-        # "_struct.Struct",
-        # "datetime.date",
-        # "datetime.timedelta",
-        # "grp.struct_group",
-        # "itertools.chain",
-        # "itertools.count",
-        # "itertools.ifilter",
-        # "itertools.ifilterfalse",
-        # "itertools.imap",
-        # "itertools.islice",
-        # "itertools.izip",
-        # "itertools.repeat",
-        # "itertools.starmap",
-        # "operator.attrgetter",
-        # "operator.itemgetter",
-        # "operator.methodcaller",
-        # "parser.ASTType",
-        # "[_json.encode_basestring_ascii, _json.make_encoder, _json.make_scanner, _json.scanstring]",
-        # "[_ctypes.Array, _ctypes.Structure, _ctypes.Union, _ctypes._Pointer, _ctypes._SimpleCData, _ctypes.Union, type(_ctypes._SimpleCData), type(_ctypes.CFuncPtr)]",
-        # ctypes is not a native module, but it seems impossible to expose the
-        # native StgDict type from _ctypes.
-        # "__import__('ctypes')",
-        # uuid is a .py module, but it might have side effect loading libuuid,
-        # which cannot be serialized.
-        # "__import__('uuid')",
     ],
-    nullify=[ffi, lib, pos, PtrWriter, dump, load, codegen],
+    replaces=[(ffi, None), (lib, None), (pos, None), (PtrWriter, None), (dump, None), (load, None), (codegen, None)],
 )

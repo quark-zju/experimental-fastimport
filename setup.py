@@ -10,5 +10,11 @@ setup(
             extra_compile_args=["-g", "-march=native", "-std=c99"],
             extra_link_args=[],
         ),
+        Extension(
+            "foo",
+            sources=["foo.c"],
+            extra_compile_args=["-g", "-march=native", "-std=c99"],
+            extra_link_args=[],
+        ),
     ]
 )
