@@ -397,25 +397,27 @@ def _dummies():
 
 import imp
 
-def importnative(name, path):
+
+def importnative(name, path=""):
     # Assumes "imp" is in globals.
     if not path:
         # Builtin
         return imp.init_builtin(name)
     # Load extension module with less stating or parent module checking.
-    pos = name.rfind('.')
+    pos = name.rfind(".")
     if pos != -1:
         pname = name[:pos]
-        sys = imp.init_builtin('sys')
+        sys = imp.init_builtin("sys")
         modules = sys.modules
         if pname not in modules:
             modules[pname] = type(sys)(pname)
             result = imp.load_dynamic(name, path)
             del modules[pname]
             return result
-    return imp.load_dynamic(name, pname)
+    return imp.load_dynamic(name, path)
 
-#lib._PyImport_LoadDynamicModule('hgext.extlib.linelog', path, ffi.cast('PyFileObject*', id(f)).f_fp)
+
+# lib._PyImport_LoadDynamicModule('hgext.extlib.linelog', path, ffi.cast('PyFileObject*', id(f)).f_fp)
 
 
 class DynamicBuffer(object):
@@ -638,7 +640,7 @@ class DynamicBuffer(object):
             assert reallocsize == 0, "Pointer in libpython cannot be moved"
             dlpath, dloffset = dlinfo[0], dlinfo[1]
             self._writerawptr(offset, dloffset)
-            isobj = getattr(ptr, 'ob_refcnt', None) is not None
+            isobj = getattr(ptr, "ob_refcnt", None) is not None
             self._appenddloffset(offset, dlpath, isobj)
             # In a library (ex. C functions, None, True, etc)
             # Note: If it's a PyType. Then we should check if it needs
@@ -1381,9 +1383,9 @@ class PyWriter(PtrWriter):
             # Is the object opt-out GC?
             isgc = True
             if ptr.ob_type.tp_is_gc != ffi.NULL:
-                if typeof(ptr).kind != 'pointer': # <struct ... &>
+                if typeof(ptr).kind != "pointer":  # <struct ... &>
                     ptr = addressof(ptr)
-                ptr = cast('PyObject *', ptr)
+                ptr = cast("PyObject *", ptr)
                 isgc = ptr.ob_type.tp_is_gc(ptr)
             if not isgc:
                 return
@@ -1981,7 +1983,7 @@ class PyHeapTypeWriter(PyWriter):
         # in ob_size) is added and zeroed out so tp_members (which is past the
         # main object, see PyHeapType_GET_MEMBERS) would behave sane.
         # Otherwise tp_members might access invalid memory.
-        size = self.objptr().ob_type.tp_itemsize # ob_type: the "type" type
+        size = self.objptr().ob_type.tp_itemsize  # ob_type: the "type" type
         self.dbuf.extendraw(b"\0" * size, initialized=True)
 
     def postwritefixup(self, newptr):
@@ -1994,7 +1996,7 @@ class PyHeapTypeWriter(PyWriter):
                 continue
             else:
                 # The base object's subclasses needs fixed up
-                baseptr = cast('PyObject *', id(base))
+                baseptr = cast("PyObject *", id(base))
                 self.dbuf.addsubclassfixup(newptr, baseptr)
 
     def pyfields(self):
@@ -2362,7 +2364,10 @@ class PyModuleWriter(PyWriter):
             name = getattr(mod, "__name__", None)
             if name:
                 sys.stderr.write("   AUTOFIX module %r - added to eval list\n" % name)
-                code = "importnative(%r, %r)" % (name, path)
+                if path:
+                    code = "importnative(%r, %r)" % (name, path)
+                else:
+                    code = "imp.init_builtin(%r)" % name
                 self.dbuf.appendevalcode(code, mod)
                 existed = True
             else:
@@ -2919,7 +2924,7 @@ def load(offsets=pos, raw=False, dbuf=None):
 
     for dlindex, dloffset, offset in dbuf._subclassfixups:
         addr = dlbase(dbuf._dlnames[dlindex]) + dloffset
-        baseptr = cast('PyTypeObject *', addr)
+        baseptr = cast("PyTypeObject *", addr)
         assert baseptr.ob_type == lib.PyType_Type
         # Add "offset" to that baseptr
         assert baseptr.tp_subclasses != ffi.NULL
@@ -3064,7 +3069,10 @@ def codegen(dbuf=None, objoffset=None, modname="preload", mmapat=0x2D0000000):
     ), "Offset adjustments should not overlap"
 
     # evalcode, in compiled form
-    compiledevalcode = [marshal.dumps(compile(code, "<evalcode[%d]>" % i, "eval")) for i, code in enumerate(dbuf._evalcode)]
+    compiledevalcode = [
+        marshal.dumps(compile(code, "<evalcode[%d]>" % i, "eval"))
+        for i, code in enumerate(dbuf._evalcode)
+    ]
 
     # sorted(set(path for _i, path in dbuf._dloffsets))
     assert modname.isalnum()
@@ -3344,7 +3352,7 @@ static int relocate() {
   if (remapped) {
     debug("relocate: skip rewriting buf pointers");
   } else {
-    // #pragma omp parallel for
+    #pragma omp parallel for
     for (size_t i = 0; i < len(bufoffsets); ++i) {
       size_t *ptr = (size_t *)(bufstart + bufoffsets[i]);
       size_t value = (*ptr) + (size_t)bufstart - (size_t)mmapat;
@@ -3568,7 +3576,6 @@ PyMODINIT_FUNC init%(modname)s(void) {
                 "mmapat": mmapat,
                 "bufsize": ccode(len(dbuf._buf)),
                 "subclassfixups": ccode(dbuf._subclassfixups),
-
                 "compiledevalcode": ccode(compiledevalcode),
                 "compiledevalcodelen": ccode(map(len, compiledevalcode)),
                 "compiledevalcodemaxlen": ccode(max(map(len, compiledevalcode)) + 1),
