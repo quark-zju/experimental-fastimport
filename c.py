@@ -6,10 +6,11 @@ from cpyffi import ffi, lib
 
 import cpyffi
 import dlfcn
-import struct, ctypes
-import sys
+import marshal
 import os
 import signal
+import struct, ctypes
+import sys
 import _cffi_backend
 
 import gc
@@ -398,7 +399,7 @@ def _dummies():
 import imp
 
 
-def importnative(name, path=""):
+def importnative(name, path):
     # Assumes "imp" is in globals.
     if not path:
         # Builtin
@@ -430,7 +431,9 @@ class DynamicBuffer(object):
 
     LIBPYTHON_NAME = dladdr(id(None))[0]
 
-    def __init__(self, evalcode=(), replaces=()):
+    def __init__(self, name, evalcode=(), replaces=()):
+        assert name.isalnum()
+        self.name = name
         self._evalcode = evalcode = [
             # Must use a reference to __builtins__ in globals(). "__builtins__"
             # cannot be serialized. Otherwise code will be in "restricted"
@@ -486,7 +489,7 @@ class DynamicBuffer(object):
         self.replacemap = {id(k): v for k, v in replaces}
 
         # Main buffer
-        self._buf = bytearray(b"__DBUF_START_MARK__")
+        self._buf = bytearray()
         # Real address -> Local offset (ex. Already serialized objects)
         self.ptrmap = {}
         # Track "uninitialized" range
@@ -513,6 +516,10 @@ class DynamicBuffer(object):
         self._gcoffsets = []
         # Subclass fixups (dlindex, dloffset, bufoffset)
         self._subclassfixups = []
+
+    def firstobjoffset(self):
+        # The first (top) object
+        return min(self.ptrmap.values())
 
     def toptr(self, offset, typename="PyObject *"):
         return BufferPointer(self, offset, typename)
@@ -2947,22 +2954,36 @@ def load(offsets=pos, raw=False, dbuf=None):
     return result
 
 
+class RawCCode(str):
+    pass
+
+
 def ccode(obj):
     """Convert obj to C code"""
-    if isinstance(obj, tuple):
+    if "nt" in sys.modules:
+        # MSVC cannot support static str with > 65535 chars
+        listtypes = (list, bytearray)
+        strtypes = (str,)
+    else:
+        # Make bytearray readable
+        listtypes = list
+        strtypes = (str, bytearray)
+    if isinstance(obj, RawCCode):
+        return str(obj)
+    elif isinstance(obj, tuple):
         return "{%s}" % (",".join(map(ccode, obj)))
-    elif isinstance(obj, list):
-        result = "{ "
+    elif isinstance(obj, listtypes):
+        result = "{"
         linesize = 2
         for i in obj:
             word = "%s," % ccode(i)
             linesize += len(word)
-            if linesize > 160:
-                result += "\n  "
+            if linesize > 500:
+                result += "\n    "
                 linesize = len(word)
             result += word
-        return result.rstrip(",") + " }"
-    elif isinstance(obj, (bytearray, str)):
+        return result.rstrip(",") + "}"
+    elif isinstance(obj, strtypes):
         result = '"'
         linesize = 0
         for b in bytearray(obj):
@@ -2985,8 +3006,8 @@ def ccode(obj):
                 word = "\\%03o" % b
                 isescape = False
             linesize += len(word)
-            if linesize > 160:
-                result += '"\n  "'
+            if linesize > 500:
+                result += '"\n    "'
                 if word.startswith('""'):
                     word = word[2:]
                 linesize = len(word)
@@ -3034,11 +3055,55 @@ def _scantypes(dbuf):
         sys.stderr.write("added PyType_Ready for %s\n" % added)
 
 
-def codegen(dbuf=None, objoffset=None, modname="preload", mmapat=0x2D0000000):
-    import marshal
+def codegen(dbufs, modname="preload"):
+    code = """
+#include "DynamicBuffer.cpp"
 
-    if dbuf is None:
-        dbuf = db
+"""
+    dbufgetters = []
+    for dbuf in dbufs:
+        name = dbuf.name
+        funcname = "getdbuf%s" % name
+        code += gendbuffunc(dbuf, name, funcname)
+        dbufgetters.append(RawCCode("&" + funcname))
+
+    code += """
+static PyObject* mod;
+
+typedef DynamicBuffer (*GetDynamicBufferFunc)();
+static GetDynamicBufferFunc dbufgetters[] = %(dbufgetters)s;
+static vector<DynamicBuffer> dbufs;
+
+extern "C" {
+PyMODINIT_FUNC init%(modname)s(void) {
+  if (PyType_Ready(&PySerializedType)) return;
+  mod = Py_InitModule3("%(modname)s", NULL, NULL);
+  dbufs.reserve(len(dbufgetters));
+  for (size_t i = 0; i < len(dbufgetters); ++i) {
+    dbufs.push_back(dbufgetters[i]());
+  }
+  for (size_t i = 0; i < len(dbufgetters); ++i) {
+    PySerializedObject *dbufobj;
+    dbufobj = PyObject_New(PySerializedObject, &PySerializedType);
+    if (!dbufobj) return;
+    dbufobj->pdbuf = &dbufs[i];
+    PyModule_AddObject(mod, dbufs[i].name.c_str(), (PyObject *)dbufobj);
+  }
+}
+}
+""" % {
+        "modname": modname,
+        "dbufgetters": ccode(dbufgetters),
+    }
+
+    with open("%s.cpp" % modname, "w") as f:
+        f.write(code)
+
+
+def gendbuffunc(dbuf, name, funcname):
+    """Generate C++ code to construct a DynamicBuffer C++ object"""
+
+    assert isinstance(dbuf, DynamicBuffer)
     if not dbuf.ptrmap:
         raise IndexError("nothing stored in %r" % dbuf)
 
@@ -3047,27 +3112,12 @@ def codegen(dbuf=None, objoffset=None, modname="preload", mmapat=0x2D0000000):
 
     # Final modifications
     _scantypes(dbuf)
-    assert isinstance(dbuf, DynamicBuffer)
-    if objoffset is None:
-        # Pick the first object
-        objoffset = min(dbuf.ptrmap.values())
+
+    # Pick the first object
+    objoffset = dbuf.firstobjoffset()
 
     # Append the end mark.
-    buf = bytearray(dbuf._buf) + b"__DBUF_END_MARK__"
-    patchbufs = [
-        # Moved bytes of the buffer so "__DBUF_START_MARK__" aligns
-        # with page size.
-        b"__DBUF_PATCH_SLOT_BUF_MOVED__\0\0\0\0\0\0\0\0\0\0",
-        # The offset of "__DBUF_START_MARK__" in the file, after
-        # moved.
-        b"__DBUF_PATCH_SLOT_BUF_IN_FILE__\0\0\0\0\0\0\0\0\0\0",
-    ]
-
-    # Handle mmapat
-    if mmapat:
-        for offset in dbuf._bufoffsetset:
-            value = readrawptr(buf, offset)
-            writerawptr(buf, offset, value + mmapat)
+    buf = bytearray(dbuf._buf)
 
     # Special offsets should not overlap
     assert not (
@@ -3081,524 +3131,80 @@ def codegen(dbuf=None, objoffset=None, modname="preload", mmapat=0x2D0000000):
     ), "Offset adjustments should not overlap"
 
     # evalcode, in compiled form
-    compiledevalcode = [
-        marshal.dumps(compile(code, "<evalcode[%d]>" % i, "eval"))
-        for i, code in enumerate(dbuf._evalcode)
-    ]
+    evals = []
+    for i, code in enumerate(dbuf._evalcode):
+        compiled = marshal.dumps(compile(code, "<evalcode[%d]>" % i, "eval"))
+        count = dbuf._evalcounts[i]
+        evals.append((code, list(bytearray(compiled)), count))
+
+    dls = []
+    for path in dbuf._dlnames:
+        symbol = dlanysymbol(path)[0]
+        dls.append((path, symbol))
+
+    dlrelocs = []
+    for bufoffset, dlindex in dbuf._dloffsets:
+        dlrelocs.append((bufoffset, dlindex))
+
+    pysubcls = []
+    for dlindex, dloffset, bufoffset in dbuf._subclassfixups:
+        pysubcls.append((dlindex, dloffset, bufoffset))
+
+    pytypes = []
+    for dlindex, dloffset in dbuf._pytypeset:
+        pytypes.append((dlindex, dloffset))
 
     # sorted(set(path for _i, path in dbuf._dloffsets))
-    assert modname.isalnum()
-    with open("%s.c" % modname, "w") as f:
-        f.write(
-            r"""
-#include "Python.h"
-#include "marshal.h"
-#include "pythread.h"
-#include <dlfcn.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <stdarg.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <sys/time.h>
-#include <sys/types.h>
-#include <unistd.h>
+    return r"""
+static DynamicBuffer %(funcname)s() {
+  static uint8_t buf[] = %(buf)s;
+  static BufOffset bufoffsets[] = %(bufoffsets)s;
+  static BufOffset evaloffsets[] = %(evaloffsets)s;
+  static ReallocReloc reallocrelocs[] = %(realloc)s;
+  static DlReloc dlrelocs[] = %(dlreloc)s;
+  static BufOffset pylocks[] = %(pylocks)s;
+  static BufOffset pymods[] = %(pymods)s;
+  static SubclassFixup pysubcls[] = %(pysubcls)s;
+  static TypeReadyFixup pytypes[] = %(pytypes)s;
+  static uint8_t importnative[] = %(compiledimportnative)s;
 
-#define error(...) (PyErr_Format(PyExc_RuntimeError, __VA_ARGS__),-1)
-#define debug(...) if (debugenabled) { \
-    fprintf(stderr, "[%(modname)s][%%4.6f] ", now() - debugstarted); \
-    fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); \
-    fflush(stderr); }
-#define len(X) (sizeof(X) / sizeof((X)[0]))
-#define BUFATTR __attribute__((section ("MAINBUF")))
+  DynamicBuffer dbuf;
+  dbuf.buf = ToSizedArray(buf);
+  dbuf.bufrelocates = ToSizedArray(bufoffsets);
+  dbuf.evalrelocates = ToSizedArray(evaloffsets);
+  dbuf.dlrelocates = ToSizedArray(dlrelocs);
+  dbuf.reallocrelocates = ToSizedArray(reallocrelocs);
+  dbuf.pylocks = ToSizedArray(pylocks);
+  dbuf.pymods = ToSizedArray(pymods);
+  dbuf.pysubcls = ToSizedArray(pysubcls);
+  dbuf.pytypes = ToSizedArray(pytypes);
+  dbuf.compiledimportnative = ToSizedArray(importnative);
 
-// The extra 8192 bytes makes it possible to move buf around.
-static uint8_t buf[%(bufsize)s + 8192] BUFATTR = %(buf)s;
+  dbuf.name = %(name)s;
+  dbuf.evals = %(evals)s;
+  dbuf.dls = %(dls)s;
+  dbuf.objoffset = %(objoffset)s;
 
-static const uint32_t bufoffsets[] = %(bufoffsets)s;
-static const char *dlpathsyms[%(dlcount)d][2] = %(dlpathsyms)s;
-static const size_t dloffsets[][2] = %(dloffsets)s;
-static const size_t reallocinfo[][2] = %(realloc)s;
-static const char *evalcode[] = %(evalcode)s;
-static const size_t evalcount[] = %(evalcount)s;
-static const size_t symoffsets[] = %(symoffsets)s;
-static const size_t pylocks[] = %(pylocks)s;
-static const size_t pytypes[][2] = %(pytypes)s;
-static const size_t pymods[] = %(pymods)s;
-static const size_t subclassfixups[][3] = %(subclassfixups)s;
-
-// Marshal-ed PyCodeObjects
-static char compiledimportnative[] = %(compiledimportnative)s;
-static char compiledevalcode[][%(compiledevalcodemaxlen)s] = %(compiledevalcode)s;
-static const size_t compiledevalcodelen[] = %(compiledevalcodelen)s;
-
-static uint8_t *mmapat = (uint8_t *) %(mmapat)s;
-static uint8_t *bufstart = NULL;
-// The "useful" size for the buffer. Not sizeof(buf).
-static size_t bufsize = %(bufsize)s;
-
-// Each patchbuf string has the form: ANCHOR + "\0" + SIZE_T_VALUE
-// The ANCHOR part is for binary patching program to find
-// the location of it (to read, or write values).
-static char patchbufs[][64] = {
-  // Patched or not?
-  "__PATCH_IS_PATCHED__\0\0\0\0\0\0\0\0\0\0\0\0",
-
-  // Moved bytes of buf[] so "__DBUF_START_MARK__" aligns with page size.
-  "__PATCH_MOVED_OFFSET__\0\0\0\0\0\0\0\0\0\0\0\0",
-
-  // The offset of "__DBUF_START_MARK__" in the file, after moved.
-  "__PATCH_OFFSET_IN_FILE__\0\0\0\0\0\0\0\0\0\0\0\0",
-};
-
-const size_t PATCH_ID_IS_PATCHED = 0;
-const size_t PATCH_ID_MOVED_OFFSET = 1;
-const size_t PATCH_ID_OFFSET_IN_FILE = 2;
-
-static size_t dlbases[%(dlcount)d] = { 0 };
-
-/// Check if ABI compatible. Return 0 on success.
-static int check() {
-  if (Py_HashRandomizationFlag) {
-    return error("incompatible with PYTHONHASHSEED");
-  }
-  // TODO more checks?
-
-  return 0;
+  return dbuf;
 }
-
-/// Enable debug?
-static int debugenabled = 0;
-static double debugstarted = 0;
-static int mmapenabled = 1;
-
-static PyObject *mod = NULL;
-
-// Timestamp if debug is enabled.
-static double now() {
-  struct timeval t;
-  gettimeofday(&t, NULL);
-  return t.tv_usec / 1e6 + t.tv_sec;
-}
-
-// Read a size_t value from the patchbuffer.
-static size_t readpatch(size_t patchid) {
-  uint8_t *p = memchr(patchbufs[patchid], 0, sizeof(patchbufs[0]));
-  size_t value = 0;
-
-  if (p) {
-    // By "+ 1", skip the separator "\0".
-    value = *((size_t *)(p + 1));
-  }
-  debug("readpatch: patchid %%zu value %%zu", patchid, value);
-  return value;
-}
-
-// Try to remap buf to mmapat. Update bufstart.
-// Return 1 if mmap-ed. 0 otherwise.
-static int remapbuf() {
-  if (!readpatch(PATCH_ID_IS_PATCHED)) {
-    debug("remapbuf: skipped - not patched");
-    return 0;
-  }
-
-  // The source of mmap cannot be an existing memory region.
-  // Look at the file. Assuming this is loaded as a library,
-  // the file path can be found via dladdr.
-  Dl_info info;
-  if (dladdr(buf, &info) == 0) {
-    debug("remapbuf: dladdr failed");
-    return 0;
-  }
-
-  // Prepare fd.
-  int fd = open(info.dli_fname, O_RDONLY);
-  if (fd < 0) {
-    debug("remapbuf: open failed");
-    return 0;
-  }
-
-  // Try mmap at the desired address.
-  size_t fileoffset = readpatch(PATCH_ID_OFFSET_IN_FILE);
-  uint8_t *p = (uint8_t *)mmap(mmapat, bufsize,
-    PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, fileoffset);
-  close(fd);
-  if (p == MAP_FAILED) {
-    debug("remapbuf: mmap failed (errno = %%d)", errno);
-    return 0;
-  } if (p != mmapat) {
-    debug("remapbuf: mmap returned a different address");
-    munmap(p, bufsize);
-    return 0;
-  } else {
-    debug("remapbuf: mmap succeeded");
-    bufstart = p;
-    return 1;
-  }
-}
-
-/// Rewrite pointers to correct them. Return 0 on success.
-static int relocate() {
-  static int ready = 0;
-  if (ready == 1) {
-    return 0;
-  } else if (ready == 2) {
-    return error("relocate() failed before and cannot recover");
-  }
-
-  if (check()) return -1;
-
-  debug("relocate: start");
-
-  // Get pointers to set, dict dummies (place holder for deleted keys)
-  PyObject *setdummy, *dictdummy;
-  {
-    PyObject *zero = PyInt_FromLong(0);
-    PyObject *set = PySet_New(NULL);
-    PyObject *dict = PyDict_New();
-    if (!zero || !set || !dict) return error("cannot allocate test objects");
-    PySet_Add(set, zero);
-    PySet_Discard(set, zero);
-    setdummy = ((PySetObject *)set)->table[0].key;
-    PyDict_SetItem(dict, zero, zero);
-    PyDict_DelItem(dict, zero);
-    dictdummy = ((PyDictObject *)dict)->ma_table[0].me_key;
-    if (!setdummy || !dictdummy) return error("unexpected Python internals");
-    Py_DECREF(zero);
-  }
-  debug("relocate: got dummy objects");
-
-  // Resolving library bases
-  // TODO: checksum libraries
-  for (size_t i = 0; i < %(dlcount)d; ++i) {
-    const char *path = dlpathsyms[i][0];
-    debug("relocate:   opening %%s", path);
-    void *dl = dlopen(path, RTLD_LAZY);
-    if (!dl) error("cannot dlopen %%s", path);
-    const char *symbol = dlpathsyms[i][1];
-    void *addr = dlsym(dl, symbol);
-    if (!addr) error("cannot dlsym symbol %%s from %%s", symbol, path);
-    Dl_info info;
-    if (dladdr(addr, &info) == 0) error("cannot dladdr symbol %%s from %%s", symbol, path);
-    dlbases[i] = (size_t)info.dli_fbase;
-    // Skip dlclose intentionally. So if we first loaded the library, Python
-    // will get the same address. // dlclose(dl);
-  }
-  debug("relocate: opened %%d libraries", %(dlcount)d);
-
-  // Eval code to get dependent objects
-  PyObject *evalvalues;
-  {
-    evalvalues = (PyObject *)PyList_New(0);
-
-    // Append Fixed None and dummy values
-    PyList_Append(evalvalues, Py_None);
-    PyList_Append(evalvalues, setdummy);
-    PyList_Append(evalvalues, dictdummy);
-
-    PyObject *globals = PyEval_GetGlobals();
-    PyObject *locals = PyImport_GetModuleDict();
-    if (!evalvalues || !globals || !locals) return error("cannot allocate eval environments");
-
-    // Prepare "imp", used by "importnative"
-    if (!PyDict_GetItemString(globals, "imp")) {
-    // "import imp"
-      PyObject *impmod = PyImport_ImportModule("imp");
-      if (!impmod) return -1;
-      if (PyDict_SetItemString(globals, "imp", impmod)) return error("cannot set imp to globals");
+""" % {
+        "funcname": funcname,
+        "name": ccode(name),
+        "buf": ccode(buf),
+        "bufoffsets": ccode(sorted(dbuf._bufoffsetset)),
+        "evaloffsets": ccode(sorted(dbuf._symoffsetset)),
+        "dlreloc": ccode(sorted(dbuf._dloffsets)),
+        "realloc": ccode(sorted(dbuf._realloc)),
+        "evals": ccode(evals),
+        "dls": ccode(dls),
+        "dlrelocates": ccode(sorted(dlrelocs)),
+        "pylocks": ccode(sorted(dbuf._pylocks)),
+        "pymods": ccode(sorted(dbuf._pymodset)),
+        "pysubcls": ccode(sorted(pysubcls)),
+        "pytypes": ccode(sorted(pytypes)),
+        "compiledimportnative": ccode(list(bytearray(marshal.dumps(importnative.func_code)))),
+        "objoffset": objoffset,
     }
-
-    // Prepare the "importnative" function
-    if (!PyDict_GetItemString(globals, "importnative")) {
-      // -1: remove "\0" added by the C compiler
-      PyObject *code = PyMarshal_ReadObjectFromString(compiledimportnative, sizeof(compiledimportnative) - 1);
-      if (!code) return error("cannot read code");
-      PyObject *func = PyFunction_New(code, globals);
-      if (!func) return error("cannot create importnative function");
-      if (PyDict_SetItemString(globals, "importnative", func)) return error("cannot set importnative to globals");
-    }
-
-    // Evalulate code!
-    assert(len(evalcode) == len(compiledevalcode));
-    for (size_t i = 0; i < len(evalcode); ++i) {
-      debug("relocate:   evaluating %%s", evalcode[i]);
-      PyObject *code = PyMarshal_ReadObjectFromString(compiledevalcode[i], compiledevalcodelen[i]);
-      if (!code) return error("cannot read evalcode %%zu", i);
-      PyObject *value = PyEval_EvalCode((PyCodeObject *)code, globals, locals);
-      if (!value) return -1;
-      size_t count = 1;
-      if (PyList_CheckExact(value)) {
-        count = PyList_GET_SIZE(value);
-        for (size_t j = 0; j < count; ++j) {
-          PyObject *item = PyList_GET_ITEM(value, j);
-          if (item == Py_None) return error("cannot have None in eval result (%%zu)", j);
-          item->ob_refcnt += (1 << 28);
-          PyList_Append(evalvalues, item);
-        }
-        Py_DECREF(value);
-      } else {
-        count = 1;
-        value->ob_refcnt += (1 << 28);
-        if (value == Py_None) return error("cannot have None in eval result");
-        PyList_Append(evalvalues, value);
-      }
-      if (count != evalcount[i]) return error("eval count mismatch: %%s", evalcode[i]);
-    }
-
-    // Keep them referenced. So GC would not collect them. (??)
-    if (mod) {
-      PyModule_AddObject(mod, "_evalvalues", evalvalues);
-    }
-  }
-  debug("relocate: evaluated %%zu expressions", len(evalcode));
-
-  // buf[] will be modified so retry this function won't work.
-  ready = 2;
-
-  // Try remap buf if enabled
-  int remapped = mmapenabled && remapbuf();
-
-  // Fix pointers to the buffer
-  assert(sizeof(size_t) == sizeof(void *));
-  if (remapped) {
-    debug("relocate: skip rewriting buf pointers");
-  } else {
-    %(ompbufoffsets)s
-    for (size_t i = 0; i < len(bufoffsets); ++i) {
-      size_t *ptr = (size_t *)(bufstart + bufoffsets[i]);
-      size_t value = (*ptr) + (size_t)bufstart - (size_t)mmapat;
-      *ptr = value;
-    }
-    debug("relocate: rewrote %%zu buf pointers", len(bufoffsets));
-  }
-
-  // Fix pointers to libraries
-  for (size_t i = 0; i < len(dloffsets); ++i) {
-    size_t offset = dloffsets[i][0];
-    size_t dlindex = dloffsets[i][1];
-    size_t base = dlbases[dlindex];
-    size_t *ptr = (size_t *)(bufstart + offset);
-    *ptr += base;
-  }
-  debug("relocate: rewrote %%zu library pointers", len(dloffsets));
-
-  // Relocate PyObject pointers to eval-ed (external) objects
-  for (size_t i = 0; i < len(symoffsets); ++i) {
-    size_t offset = symoffsets[i];
-    size_t symid = *(size_t *)(bufstart + offset);
-    PyObject *value = PyList_GET_ITEM(evalvalues, symid);
-    *(PyObject **)(bufstart + offset) = value;
-  }
-  debug("relocate: rewrote %%zu symbol pointers", len(symoffsets));
-
-  // Re-create PyThread_type_lock
-  for (size_t i = 0; i < len(pylocks); ++i) {
-    *(PyThread_type_lock *)(bufstart + pylocks[i]) = PyThread_allocate_lock();
-  }
-  debug("relocate: recreated %%zu locks", len(pylocks));
-
-  // Re-allocate buffers that need to be managed by the real malloc (ex.
-  // PyList's items) so they can be resized properly.
-  // This must be the last step.
-  for (size_t i = 0; i < len(reallocinfo); ++i) {
-    size_t start = reallocinfo[i][0];
-    size_t size = reallocinfo[i][1];
-    uint8_t *dst = PyMem_Malloc(size);
-    if (!dst) {
-      error("malloc failed");
-      return -1;
-    }
-    uint8_t *src = (uint8_t *)(bufstart + *((size_t *)(bufstart + start)));
-    memcpy(dst, src, size);
-    *(uint8_t **)(bufstart + start) = dst;
-  }
-  debug("relocate: reallocated %%zu buffers", len(reallocinfo));
-
-  ready = 1;
-  debug("relocate: done");
-  return 0;
-}
-
-/// Call PyType_Ready on types. Return 0 on success.
-static int typeready() {
-  static int ready = 0;
-  if (ready) return 0;
-  relocate();
-
-  debug("typeready: start");
-  for (size_t i = 0; i < len(pytypes); ++i) {
-    // Note: buf + pytypes[i] is usually the position of an object's "ob_type"
-    // field. It's a pointer to "PyTypeObject *", not a direct PyTypeObject *.
-    size_t dlindex = pytypes[i][0];
-    size_t dloffset = pytypes[i][1];
-    size_t dlbase = dlbases[dlindex];
-    PyTypeObject *obj = (PyTypeObject *)(dlbase + dloffset);
-    if (PyType_Ready(obj)) return -1;
-  }
-  debug("typeready: %%zu types ready", len(pytypes));
-
-  for (size_t i = 0; i < len(subclassfixups); ++i) {
-    size_t dlindex = subclassfixups[i][0];
-    size_t dloffset = subclassfixups[i][1];
-    size_t offset = subclassfixups[i][2];
-
-    PyObject *sub = (PyObject *)(bufstart + offset);
-    PyTypeObject *base = (PyTypeObject *)(dlbases[dlindex] + dloffset);
-
-    // Add sub as weakref to base.__subclasses__()
-    // See add_subclass in typeobject.c
-    PyObject *ref = PyWeakref_NewRef(sub, NULL);
-    if (!ref) continue;
-    if (base->tp_subclasses == NULL) {
-      base->tp_subclasses = PyList_New(1);
-      if (!base->tp_subclasses) return -1;
-      PyList_SET_ITEM(base->tp_subclasses, 0, ref);
-    } else {
-      PyList_Append(base->tp_subclasses, ref);
-    }
-  }
-  debug("typeready: %%zu subclasses fixed", len(subclassfixups));
-
-  ready = 1;
-  debug("typeready: done");
-  return 0;
-}
-
-/// Get object stored at buffer offset. Return new reference.
-static PyObject *load() {
-  if (relocate()) return NULL;
-  if (typeready()) return NULL;
-  if (bufstart == NULL) return NULL;
-
-  PyObject *obj = (PyObject *)(bufstart + %(objoffset)d);
-  if (!obj) { PyErr_NoMemory(); return NULL; }
-  Py_INCREF(obj);
-  return obj;
-}
-
-static PyObject *modules() {
-  if (relocate()) return NULL;
-  if (typeready()) return NULL;
-  if (bufstart == NULL) return NULL;
-
-  PyObject *dict = PyDict_New();
-  if (!dict) return NULL;
-  for (size_t i = 0; i < len(pymods); ++i) {
-    size_t offset = pymods[i];
-    PyObject *mod = (PyObject *)(bufstart + offset);
-    Py_INCREF(mod);
-    const char *name = PyModule_GetName(mod);
-    if (!name || PyDict_SetItemString(dict, name, mod)) {
-      Py_DECREF(dict);
-      return NULL;
-    }
-  }
-  return dict;
-}
-
-static PyObject *contains(PyObject *self, PyObject *obj) {
-  if ((uint8_t *)obj >= bufstart && (uint8_t *)obj < bufstart + bufsize) {
-    Py_RETURN_TRUE;
-  } else {
-    Py_RETURN_FALSE;
-  }
-}
-
-static PyObject *setdebug(PyObject *self, PyObject *obj) {
-  debugenabled = (PyObject_IsTrue(obj));
-  if (debugenabled) debugstarted = now();
-  Py_RETURN_NONE;
-}
-
-static PyObject *setmmap(PyObject *self, PyObject *obj) {
-  mmapenabled = (PyObject_IsTrue(obj));
-  Py_RETURN_NONE;
-}
-
-static PyObject *getrawbuf() {
-  return PyString_FromStringAndSize((const char *)buf, (Py_ssize_t)sizeof(buf));
-}
-
-static PyObject *getpatches() {
-  PyObject *list = (PyObject *)PyList_New(len(patchbufs));
-  for (size_t i = 0; i < len(patchbufs); ++i) {
-    PyObject *item = Py_BuildValue("sK", patchbufs[i], (unsigned long long)readpatch(i));
-    if (!item) {
-      Py_DECREF(list);
-      return NULL;
-    }
-    PyList_SET_ITEM(list, i, item);
-  }
-  return list;
-}
-
-static PyObject *getevals() {
-  PyObject *list = (PyObject *)PyList_New(len(evalcode));
-  for (size_t i = 0; i < len(evalcode); ++i) {
-    PyObject *item = PyString_FromString(evalcode[i]);
-    if (!item) {
-      Py_DECREF(list);
-      return NULL;
-    }
-    PyList_SET_ITEM(list, i, item);
-  }
-  return list;
-}
-
-static PyMethodDef methods[] = {
-  {"load", load, METH_NOARGS, "Extract the single top-level object"},
-  {"modules", modules, METH_NOARGS, "Extract all modules stored"},
-  {"contains", contains, METH_O, "Test if an object is provided by this module"},
-  {"setdebug", setdebug, METH_O, "Enable or disable debug prints"},
-  {"setmmap", setmmap, METH_O, "Enable or disable using mmap"},
-  {"_rawbuf", getrawbuf, METH_NOARGS, "Get the raw buffer"},
-  {"_patches", getpatches, METH_NOARGS, "Get patched values"},
-  {"_evalcodes", getevals, METH_NOARGS, "Get embedded eval expression"},
-  {NULL, NULL}
-};
-
-PyMODINIT_FUNC init%(modname)s(void) {
-  bufstart = buf + readpatch(PATCH_ID_MOVED_OFFSET);
-  PyObject *m = Py_InitModule3("%(modname)s", methods, NULL);
-  mod = m;
-}
-"""
-            % {
-                "modname": modname,
-                "modnameupper": modname.upper(),
-                # Append some room so the real content of the buffer
-                # can be moved to align to a page.
-                # This must be greater than the page size (4096).
-                "buf": ccode(buf),
-                "bufoffsets": ccode(sorted(dbuf._bufoffsetset)),
-                "dlpathsyms": ccode(
-                    [(path, dlanysymbol(path)[0]) for path in dbuf._dlnames]
-                ),
-                "dlcount": len(dbuf._dlnames),
-                "dloffsets": ccode(sorted(dbuf._dloffsets)),
-                "realloc": ccode(sorted(dbuf._realloc)),
-                "evalcode": ccode(dbuf._evalcode),
-                "evalcount": ccode(dbuf._evalcounts),
-                "symoffsets": ccode(sorted(dbuf._symoffsetset)),
-                "pylocks": ccode(sorted(dbuf._pylocks)),
-                "pytypes": ccode(sorted(dbuf._pytypeset)),
-                "pymods": ccode(sorted(dbuf._pymodset)),
-                "objoffset": objoffset,
-                "mmapat": mmapat,
-                "bufsize": ccode(len(dbuf._buf)),
-                "subclassfixups": ccode(dbuf._subclassfixups),
-                "compiledevalcode": ccode(compiledevalcode),
-                "compiledevalcodelen": ccode(map(len, compiledevalcode)),
-                "compiledevalcodemaxlen": ccode(max(map(len, compiledevalcode)) + 1),
-                "compiledimportnative": ccode(marshal.dumps(importnative.func_code)),
-                "ompbufoffsets": "#pragma omp parallel for"
-                if len(dbuf._bufoffsetset) > 300000
-                else "",
-            }
-        )
 
 
 # sys.stdin, out, err, modules
@@ -3609,17 +3215,20 @@ evalcode = [
     # "__import__('posix').environ",
     # native modules
     # "map(__import__, ['_ctypes', '_bsddb', 'sys', '_io', '_collections', '_socket'])",
-    "__import__('_ctypes').__dict__.values()",
+    # "__import__('_ctypes').__dict__.values()",
     # stdin, stdout, stderr; file object cannot be serialized
-    "[v for k, v in __import__('sys').__dict__.iteritems() if k in {'stdin', 'stdout', 'stderr', 'modules'}]",
+    "imp.init_builtin('sys')",
+    "[sys.stdin, sys.stdout, sys.stderr, sys.modules]",
+    # "[v for k, v in __import__('sys').__dict__.items() if k in {'stdin', 'stdout', 'stderr', 'modules'}]",
     # see bsddb/db.py - it reexports bsddb: exec("from ._bsddb import __version__")
     # "__import__('_bsddb').__dict__.values()",
     # # io.py wants a lot from _io
     # "__import__('_io').__dict__.values()",
-    "__import__('_collections').__dict__.values()",
+    # "__import__('_collections').__dict__.values()",
 ]
 
 db = DynamicBuffer(
+    name="main",
     evalcode=evalcode,
     replaces=[
         (ffi, None),
