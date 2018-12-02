@@ -830,6 +830,7 @@ class PtrWriter(object):
             # Might call write again
             try:
                 self.writebodyat(newptr)
+                self.postwritefixup(newptr)
                 self.dbuf.ensureinitialized(offset, size, self.offsettable)
             except (
                 NotImplementedError,
@@ -954,6 +955,9 @@ class PtrWriter(object):
             else:
                 raise TypeError("Unknown action: %r" % action)
         self.DEBUGSTEP = ""
+
+    def postwritefixup(self, newptr):
+        pass
 
     def writeptrat(self, offset, **kwargs):
         """Make offset a pointer to this object. Write object if needed.
@@ -1636,6 +1640,9 @@ class PyFunctionWriter(PyWriter):
 class PyObjectWriter(PyWriter):
     TYPENAME = "PyObject *"
 
+    # Note: Sometimes this writes PyHeapTypeObject. For example, when the
+    # ob_type is ABCMeta.
+
     # Minimal PyObject, plus dictobject and weaklist pointers
     COMMON_SIZE = sizeof("PyObject") + 2 * SIZEOF_VOID_P
 
@@ -1735,6 +1742,13 @@ class PyObjectWriter(PyWriter):
         # Although it's only used by PyHeapTypeObject for now.
         if writer:
             writer.maybewritefooter()
+
+    def postwritefixup(self, newptr):
+        basetypeptr, basesize, writer = self.baseinfo()
+        # Only used by PyHeapTypeObject for now.
+        # Why PyObjectWriter is used for HeapType?
+        if writer:
+            writer.postwritefixup(newptr)
 
     def baseinfo(self):
         """Return (basetypeptr, basesize, writer?)
@@ -1946,9 +1960,7 @@ class PyHeapTypeWriter(PyWriter):
         size = self.objptr().ob_type.tp_itemsize # ob_type: the "type" type
         self.dbuf.extendraw(b"\0" * size, initialized=True)
 
-
-    def writebodyat(self, newptr):
-        result = super(PyHeapTypeWriter, self).writebodyat(newptr)
+    def postwritefixup(self, newptr):
         # Fixup subclass potentially.
         # More convinent to just use Python object here.
         obj = toobj(self.objptr())
@@ -1960,8 +1972,6 @@ class PyHeapTypeWriter(PyWriter):
                 # The base object's subclasses needs fixed up
                 baseptr = cast('PyObject *', id(base))
                 self.dbuf.addsubclassfixup(newptr, baseptr)
-        return result
-
 
     def pyfields(self):
         ptr = self.objptr()
