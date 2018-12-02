@@ -466,6 +466,10 @@ class DynamicBuffer(object):
         self._pytypeset = set()  # (dlindex, dloffset)
         # Modules
         self._pymodset = set()
+        # GC offsets
+        self._gcoffsets = []
+        # Subclass fixups (dlindex, dloffset, bufoffset)
+        self._subclassfixups = []
 
     def toptr(self, offset, typename="PyObject *"):
         return BufferPointer(self, offset, typename)
@@ -659,6 +663,12 @@ class DynamicBuffer(object):
             assert offset not in self._symoffsetset
             self._symoffsetset.add(offset)
 
+    def writegcheader(self):
+        self._gcoffsets.append(len(self._buf))
+        header = ffi.new("PyGC_Head *")
+        header.gc.gc_refs = lib._PyGC_REFS_UNTRACKED
+        self.extendraw(ffi.buffer(header), initialized=True)
+
     def allocatelock(self, offset):
         offset = self._normalizeoffset(offset)
         self._writerawptr(offset, 0)
@@ -673,6 +683,14 @@ class DynamicBuffer(object):
         self._evalcode.append(code)
         self._evalvalues.append(value)
         self._evalcounts.append(1)
+
+    def addsubclassfixup(self, offset, baseptr):
+        offset = self._normalizeoffset(offset)
+        dlinfo = dladdr(baseptr)
+        assert dlinfo is not None, "Base class should be known at this point"
+        dlpath, dloffset = dlinfo[0], dlinfo[1]
+        dlindex = self._dlnames.index(dlpath)
+        self._subclassfixups.append((dlindex, dloffset, offset))
 
     def markmodule(self, offset):
         """Mark a ptr as a module. This does not affect correctness. But
@@ -1326,12 +1344,19 @@ class PyWriter(PtrWriter):
         # Note: It's possible that tp_is_gc says "no gc header" but we still
         # write one. That's okay since it's just wasting some bytes.
         ptr = self.objptr()
-        if ptr.ob_type.tp_flags & lib.Py_TPFLAGS_HAVE_GC:
+        if bool(ptr.ob_type.tp_flags & lib.Py_TPFLAGS_HAVE_GC):
+            # Is the object opt-out GC?
+            isgc = True
+            if ptr.ob_type.tp_is_gc != ffi.NULL:
+                if typeof(ptr).kind != 'pointer': # <struct ... &>
+                    ptr = addressof(ptr)
+                ptr = cast('PyObject *', ptr)
+                isgc = ptr.ob_type.tp_is_gc(ptr)
+            if not isgc:
+                return
             # Write the GC header. The object cannot be GC-ed. Therefore write
             # a fixed header marking it as untracked.
-            header = ffi.new("PyGC_Head *")
-            header.gc.gc_refs = lib._PyGC_REFS_UNTRACKED
-            self.dbuf.extendraw(ffi.buffer(header), initialized=True)
+            self.dbuf.writegcheader()
 
     def fields(self):
         # Common fields for PyObject
@@ -1906,15 +1931,32 @@ class PyHeapTypeWriter(PyWriter):
     TYPENAME = "PyHeapTypeObject *"
 
     def objptr(self):
-        return self.ptr.ht_type
+        return addressof(self.ptr.ht_type)
 
     def maybewritefooter(self):
         # See PyType_GenericAlloc in typeobject.c. An extra item (not counted
         # in ob_size) is added and zeroed out so tp_members (which is past the
         # main object, see PyHeapType_GET_MEMBERS) would behave sane.
         # Otherwise tp_members might access invalid memory.
-        size = self.objptr().ob_type.tp_itemsize
+        size = self.objptr().ob_type.tp_itemsize # ob_type: the "type" type
         self.dbuf.extendraw(b"\0" * size, initialized=True)
+
+
+    def writebodyat(self, newptr):
+        result = super(PyHeapTypeWriter, self).writebodyat(newptr)
+        # Fixup subclass potentially.
+        # More convinent to just use Python object here.
+        obj = toobj(self.objptr())
+        for base in obj.__bases__:
+            if id(base) in self.dbuf.ptrmap:
+                # The base object was serialized
+                continue
+            else:
+                # The base object's subclasses needs fixed up
+                baseptr = cast('PyObject *', id(base))
+                self.dbuf.addsubclassfixup(newptr, baseptr)
+        return result
+
 
     def pyfields(self):
         ptr = self.objptr()
@@ -2811,6 +2853,17 @@ def load(offsets=pos, raw=False, dbuf=None):
         newptr = lib.PyMem_Malloc(size)
         ffi.memmove(newptr, ffi.cast("uint8_t *", bufstart + start), size)
         writerawptr(buf, offset, ptrint(newptr))
+
+    for dlindex, dloffset, offset in dbuf._subclassfixups:
+        print('TODO: subclass fixup for offset %r' % offset)
+
+    # Experimental: Mark objects as tracked.
+    # for gcoffset in dbuf._gcoffsets:
+    #     print('Write GC offset %d' % gcoffset)
+    #     objoffset = bufstart + gcoffset + sizeof('PyGC_Head')
+    #     print(repr(toobj(objoffset)))
+    #     gcheader = ffi.cast('PyGC_Head *', bufstart + gcoffset)
+    #     lib.PyObject_GC_Track(cast('PyObject *', objoffset))
 
     # Skip handling _pytypeset: They are already ready.
     # (Because DynamicBuffer cannot be serialized so load() runs in a ready
