@@ -605,7 +605,8 @@ class DynamicBuffer(object):
             assert reallocsize == 0, "Pointer in libpython cannot be moved"
             dlpath, dloffset = dlinfo[0], dlinfo[1]
             self._writerawptr(offset, dloffset)
-            self._appenddloffset(offset, dlpath)
+            isobj = getattr(ptr, 'ob_refcnt', None) is not None
+            self._appenddloffset(offset, dlpath, isobj)
             # In a library (ex. C functions, None, True, etc)
             # Note: If it's a PyType. Then we should check if it needs
             # PyType_Ready.
@@ -648,7 +649,7 @@ class DynamicBuffer(object):
                 if dlpath in self._dlnames:
                     f.write("  in known dl\n")
                     self._writerawptr(offset, dloffset)
-                    self._appenddloffset(offset, dlpath)
+                    self._appenddloffset(offset, dlpath, isobj=True)
                     return
             # Make the weakref dead (None)
             f.write(" unknown\n")
@@ -741,7 +742,7 @@ class DynamicBuffer(object):
         self._bufoffsetset.add(offset)
         self._bufoffsets.append(offset)
 
-    def _appenddloffset(self, offset, dlpath):
+    def _appenddloffset(self, offset, dlpath, isobj):
         assert offset not in self._dloffsetset, "Double write detected"
         try:
             dlindex = self._dlnames.index(dlpath)
@@ -749,11 +750,10 @@ class DynamicBuffer(object):
             dlindex = len(self._dlnames)
             self._dlnames.append(dlpath)
             if "cffi_backend" in dlpath:
-                import IPython
-
-                IPython.embed()
+                raise NotImplementedError("cffi_backend shouldn't be included!")
         self._dloffsetset.add(offset)
-        self._dloffsets.append((offset, dlindex))
+        dlindexobj = (dlindex << 1) | int(bool(isobj))
+        self._dloffsets.append((offset, dlindexobj))
 
 
 # How to write types to the buffer
@@ -2780,8 +2780,10 @@ def load(offsets=pos, raw=False, dbuf=None):
     bufstart = ptrint(bufptr.ob_bytes)
     print("bufstart %x len %d" % (bufstart, len(buf)))
 
-    for offset, dlindex in dbuf._dloffsets:
+    for offset, dlindexobj in dbuf._dloffsets:
         value = dbuf._readrawptr(offset)
+        dlindex = dlindexobj >> 1
+        isobj = dlindexobj & 1
         dlpath = dbuf._dlnames[dlindex]
         base = dlbase(dlpath)
         writerawptr(buf, offset, value + base)
@@ -2956,7 +2958,7 @@ def codegen(dbuf=None, objoffset=None, modname="preload", mmapat=0x2D0000000):
         dbuf._dloffsetset & dbuf._symoffsetset
     ), "Offset adjustments should not overlap"
 
-    sorted(set(path for _i, path in dbuf._dloffsets))
+    # sorted(set(path for _i, path in dbuf._dloffsets))
     assert modname.isalnum()
     with open("%s.c" % modname, "w") as f:
         f.write(
@@ -3216,9 +3218,14 @@ static int relocate() {
   // Fix pointers to libraries
   for (size_t i = 0; i < len(dloffsets); ++i) {
     size_t offset = dloffsets[i][0];
-    size_t dlindex = dloffsets[i][1];
+    size_t dlindex = dloffsets[i][1] >> 1;
+    size_t isobj = dloffsets[i][1] & 1;
     size_t base = dlbases[dlindex];
-    *(size_t *)(bufstart + offset) += base;
+    size_t *ptr = (size_t *)(bufstart + offset);
+    *ptr += base;
+    if (isobj) {
+      Py_INCREF((PyObject *)(*ptr));
+    }
   }
   debug("relocate: rewrote %%zu library pointers", len(dloffsets));
 
