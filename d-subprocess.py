@@ -12,6 +12,9 @@ codegen(modname='foo')
 v = load(pos)[0]
 subprocess = v
 
+import gc
+gc.disable()
+
 proc = v.Popen(['cat'], stdin=v.PIPE, stdout=v.PIPE)
 print(proc.communicate('foo'))
 
