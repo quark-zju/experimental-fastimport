@@ -1822,6 +1822,12 @@ class PyTypeWriter(PyWriter):
             isheaptype2 == isheaptype
         ), "Seems PyHeapTypeWriter should be used instead"
 
+        flags = self.ptr.tp_flags
+        # Drop Py_TPFLAGS_VALID_VERSION_TAG. It needs to be re-assigned.
+        # See typeobject.c - assign_version_tag.
+        if flags & lib.Py_TPFLAGS_VALID_VERSION_TAG:
+            flags ^= lib.Py_TPFLAGS_VALID_VERSION_TAG
+
         fields = [
             ("ob_size", Action.COPY),
             ("tp_name", Action.CLONE_PTR),
@@ -1838,7 +1844,7 @@ class PyTypeWriter(PyWriter):
             ("tp_str", Action.CLONE_PTR_SHALLOW),
             ("tp_getattro", Action.CLONE_PTR_SHALLOW),
             ("tp_setattro", Action.CLONE_PTR_SHALLOW),
-            ("tp_flags", Action.COPY),
+            ("tp_flags", Action.ASSIGN, flags),
             ("tp_doc", Action.CLONE_PTR),
             ("tp_traverse", Action.CLONE_PTR_SHALLOW),
             ("tp_clear", Action.CLONE_PTR_SHALLOW),
@@ -1865,8 +1871,10 @@ class PyTypeWriter(PyWriter):
             ("tp_weaklist", Action.ASSIGN, ffi.NULL),
             ("tp_del", Action.CLONE_PTR_SHALLOW),
             # Fix padding gap between tp_version_tag (unsigned int) and nb_add.
+            # tp_version_tag needs to be reassigned from Python. See
+            # typeobject.c, next_version_tag.
             ("tp_version_tag", Action.RAW, b"\0" * 8),
-            ("tp_version_tag", Action.COPY),
+            ("tp_version_tag", Action.ASSIGN, 0),
         ]
 
         if not isheaptype:
