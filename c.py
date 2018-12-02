@@ -2894,7 +2894,6 @@ def load(offsets=pos, raw=False, dbuf=None):
         ptr = cast("PyObject *", offset + bufstart)
         ref = lib.PyWeakref_NewRef(ptr, ffi.NULL)
         lib.PyList_Append(baseptr.tp_subclasses, ref)
-        # print('TODO: subclass fixup for offset %r' % offset)
 
     return result
 
@@ -2904,8 +2903,8 @@ def ccode(obj):
     if isinstance(obj, tuple):
         return "{%s}" % (",".join(map(ccode, obj)))
     elif isinstance(obj, list):
-        result = ""
-        linesize = 0
+        result = "{ "
+        linesize = 2
         for i in obj:
             word = "%s," % ccode(i)
             linesize += len(word)
@@ -2913,7 +2912,7 @@ def ccode(obj):
                 result += "\n  "
                 linesize = len(word)
             result += word
-        return result.rstrip(",")
+        return result.rstrip(",") + " }"
     elif isinstance(obj, (bytearray, str)):
         result = '"'
         linesize = 0
@@ -3061,16 +3060,16 @@ def codegen(dbuf=None, objoffset=None, modname="preload", mmapat=0x2D0000000):
 // The extra 8192 bytes makes it possible to move buf around.
 static uint8_t buf[%(bufsize)s + 8192] BUFATTR = %(buf)s;
 
-static const uint32_t bufoffsets[] = { %(bufoffsets)s };
-static const char *dlpathsyms[%(dlcount)d][2] = { %(dlpathsyms)s };
-static const size_t dloffsets[][2] = { %(dloffsets)s };
-static const size_t reallocinfo[][2] = { %(realloc)s };
-static const char *evalcode[] = { %(evalcode)s };
-static const size_t evalcount[] = { %(evalcount)s };
-static const size_t symoffsets[] = { %(symoffsets)s };
-static const size_t pylocks[] = { %(pylocks)s };
-static const size_t pytypes[][2] = { %(pytypes)s };
-static const size_t pymods[] = { %(pymods)s };
+static const uint32_t bufoffsets[] = %(bufoffsets)s;
+static const char *dlpathsyms[%(dlcount)d][2] = %(dlpathsyms)s;
+static const size_t dloffsets[][2] = %(dloffsets)s;
+static const size_t reallocinfo[][2] = %(realloc)s;
+static const char *evalcode[] = %(evalcode)s;
+static const size_t evalcount[] = %(evalcount)s;
+static const size_t symoffsets[] = %(symoffsets)s;
+static const size_t pylocks[] = %(pylocks)s;
+static const size_t pytypes[][2] = %(pytypes)s;
+static const size_t pymods[] = %(pymods)s;
 
 static uint8_t *mmapat = (uint8_t *) %(mmapat)s;
 static uint8_t *bufstart = NULL;
