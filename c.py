@@ -1,3 +1,7 @@
+# This file was started clean (as a better rewrite of another adhoc
+# experiment). However I had to add more and more stuff here. It
+# probably can be cleaned up. Some basic designs seem good, though.
+# ex. "BufferPointer", and "def fields".
 from cpyffi import ffi, lib
 
 import cpyffi
@@ -417,7 +421,8 @@ class DynamicBuffer(object):
         # Python ID -> evalvalues index
         symbolmap = {}
         for i, val in enumerate(evalvalues):
-            symbolmap[id(val)] = i
+            if id(val) not in symbolmap:
+                symbolmap[id(val)] = i
         self._symbolmap = symbolmap
 
         # Handle "nullify". Also make sure this object itself (and the module)
@@ -453,7 +458,6 @@ class DynamicBuffer(object):
         self._dlnameset = set()
         self._dloffsetset = set()
         # Need to resolve symbols
-        self._symoffsets = []
         self._symoffsetset = set()
         # Need to allocate locks
         self._pylocks = []
@@ -591,6 +595,13 @@ class DynamicBuffer(object):
             assert reallocsize == 0, "Existing object cannot be moved"
             self._writerawptr(offset, self.ptrmap[pint])
             self._appendbufoffsets(offset)
+        elif pint in self._symbolmap:
+            # Defined symbol (ex. Pointer to an evalcode native module)
+            assert reallocsize == 0, "Symbol cannot be moved"
+            symbolid = self._symbolmap[pint]
+            self._writerawptr(offset, symbolid)
+            assert offset not in self._symoffsetset
+            self._symoffsetset.add(offset)
         elif dlinfo is not None:
             assert reallocsize == 0, "Pointer in libpython cannot be moved"
             dlpath, dloffset = dlinfo[0], dlinfo[1]
@@ -600,14 +611,6 @@ class DynamicBuffer(object):
             # Note: If it's a PyType. Then we should check if it needs
             # PyType_Ready.
             self.marktype(ptr, dlinfo)
-        elif pint in self._symbolmap:
-            # Defined symbol (ex. Pointer to an evalcode native module)
-            symbolid = self._symbolmap[pint]
-            self._writerawptr(offset, symbolid)
-            assert offset not in self._symoffsetset
-            self._symoffsetset.add(offset)
-            self._symoffsets.append(offset)
-            assert reallocsize == 0, "Symbol cannot be moved"
         else:
             msg = "Unknown pointer: %r%s" % (ptr, ptrhint(ptr))
             raise TypeError(msg)
@@ -2009,7 +2012,7 @@ class PyWeakReferenceWriter(PyWriter):
         self.dbuf.writeweakrefptr(newptr.fieldptr("wr_object"), self.ptr.wr_object)
 
     def pyfields(self):
-        # By default, write NULL as "wr_object" so we won't serializing too
+        # By default, write None as "wr_object" so we won't serializing too
         # many "uninteresting" objects. tp_subclasses is a list of weakrefs.
         # And subclasses can introduce objects way more than requested.
         #
@@ -2017,7 +2020,7 @@ class PyWeakReferenceWriter(PyWriter):
         # function to fixup the object pointer after other objects have been
         # written. Then check if the object is serialized and write it if so.
         return [
-            ("wr_object", Action.ASSIGN, ffi.NULL),
+            ("wr_object", Action.ASSIGN, cast("PyObject *", id(None))),
             ("wr_callback", Action.CLONE_PTR),
             ("hash", Action.COPY),
             # The linked list is used to set a chain of weakrefs' wr_object to
@@ -2703,7 +2706,7 @@ def load(offsets=pos, raw=False, dbuf=None):
         value = dbuf._readrawptr(offset)
         writerawptr(buf, offset, value + bufstart)
 
-    for offset in dbuf._symoffsets:
+    for offset in sorted(dbuf._symoffsetset):
         symid = dbuf._readrawptr(offset)
         obj = dbuf._evalvalues[symid]
         writerawptr(buf, offset, id(obj))
@@ -2812,6 +2815,7 @@ def _scantypes(dbuf):
         itertools.tee_dataobject osutil.stat parsers.index
         time.struct_time""".split()
     )
+    added = []
     for typeobj in (
         object.__subclasses__() + list.__subclasses__() + dict.__subclasses__()
     ):
@@ -2819,7 +2823,9 @@ def _scantypes(dbuf):
             continue
         typeptr = toptr(typeobj)
         if dbuf.marktype(typeptr):
-            sys.stderr.write("added missed PyType_Ready for %r\n" % typeobj)
+            added.append(typeobj)
+    if added:
+        sys.stderr.write("added PyType_Ready for %s\n" % added)
 
 
 def codegen(dbuf=None, objoffset=None, modname="preload", mmapat=0x2D0000000):
@@ -2856,7 +2862,9 @@ def codegen(dbuf=None, objoffset=None, modname="preload", mmapat=0x2D0000000):
             writerawptr(buf, offset, value + mmapat)
 
     # Special offsets should not overlap
-    assert not (dbuf._bufoffsetset & dbuf._dloffsetset & dbuf._symoffsetset)
+    assert not (dbuf._bufoffsetset & dbuf._dloffsetset), "Offset adjustments should not overlap"
+    assert not (dbuf._bufoffsetset & dbuf._symoffsetset), "Offset adjustments should not overlap"
+    assert not (dbuf._dloffsetset & dbuf._symoffsetset), "Offset adjustments should not overlap"
 
     sorted(set(path for _i, path in dbuf._dloffsets))
     assert modname.isalnum()
@@ -3299,7 +3307,7 @@ PyMODINIT_FUNC init%(modname)s(void) {
                 "realloc": ccode(sorted(dbuf._realloc)),
                 "evalcode": ccode(dbuf._evalcode),
                 "evalcount": ccode(dbuf._evalcounts),
-                "symoffsets": ccode(sorted(dbuf._symoffsets)),
+                "symoffsets": ccode(sorted(dbuf._symoffsetset)),
                 "pylocks": ccode(sorted(dbuf._pylocks)),
                 "pytypes": ccode(sorted(dbuf._pytypeset)),
                 "pymods": ccode(sorted(dbuf._pymodset)),

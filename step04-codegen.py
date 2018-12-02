@@ -108,7 +108,7 @@ modnames = [
     "hgext",
     "hgext.absorb",
     "hgext.amend",
-    "hgext.arcdiff", # datetime issues
+    "hgext.arcdiff",  # datetime issues
     "hgext.automv",
     "hgext.blackbox",
     "hgext.checkmessagehook",
@@ -181,6 +181,7 @@ modnames = [
     "hgext.undo",
 ]
 
+
 def _resolvenestedmodules(mod, name):
     """resolve nested modules
 
@@ -192,11 +193,12 @@ def _resolvenestedmodules(mod, name):
         mod = getattr(mod, comp)
     return mod
 
+
 d = {}
 for name in modnames:
     d[name] = _resolvenestedmodules(__import__(name), name)
 
-print('serializing')
+print("serializing")
 
 import ctypes, ctypes._endian, os, sys
 import atexit, threading
@@ -210,7 +212,7 @@ db = c.DynamicBuffer(
     evalcode=[
         # Those are printed by "python -Sc 'import sys; print(sys.modules.keys())'".
         "[sys.modules[k] for k in ['zipimport', 'encodings.__builtin__', '_codecs', 'signal', 'encodings', 'encodings.codecs', '__builtin__', 'encodings.utf_8', 'sys', 'encodings.aliases', 'exceptions', 'encodings.encodings', '_warnings', 'codecs']]",
-        '[sys, sys.stdin, sys.stdout, sys.stderr, sys.modules, os]',
+        "[sys, sys.stdin, sys.stdout, sys.stderr, sys.modules, os]",
         # native modules
         "__import__('_ctypes').__dict__.values()",
         "__import__('_collections').__dict__.values()",
@@ -233,23 +235,21 @@ db = c.DynamicBuffer(
 # Whitelist bser.so
 c.PyModuleWriter.WHITELIST.add("bser.so")
 
-
-#import ipdb
-# ipdb has side effect on __builtins__
-# with ipdb.launch_ipdb_on_exception():
 dump(d, dbuf=db)
 
-
-print('generating code')
+print("generating code")
 codegen(dbuf=db)
-print('dump ptrmap')
 
-with open('ptrmap', 'w') as f:
-    for k, v in sorted(db.ptrmap.iteritems()):
-        f.write("%d %d\n" % (k, v))
+if "d" in sys.argv:
+    print("dump ptrmap")
+    with open("ptrmap", "w") as f:
+        for k, v in sorted(db.ptrmap.iteritems()):
+            f.write("%d %d\n" % (k, v))
 
+if "v" in sys.argv:
+    v = load(pos, dbuf=db)
 
-print('done')
-# v = load(pos, dbuf=db)
+print("done")
 
-__import__('IPython').embed()
+if "i" in sys.argv:
+    __import__("IPython").embed()
