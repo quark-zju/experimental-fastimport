@@ -139,9 +139,14 @@ def dlanysymbol(path):
     raise RuntimeError("cannot guess a known symbol name from %r" % path)
 
 
+_dlbasecache = {}
+
+
 def dlbase(path):
     """Find the base location of a library. Return an integer or raise."""
-    return dlanysymbol(path)[2]
+    if path not in _dlbasecache:
+        _dlbasecache[path] = dlanysymbol(path)[2]
+    return _dlbasecache[path]
 
 
 class UninitializedMemoryError(NotImplementedError):
@@ -2854,9 +2859,6 @@ def load(offsets=pos, raw=False, dbuf=None):
         ffi.memmove(newptr, ffi.cast("uint8_t *", bufstart + start), size)
         writerawptr(buf, offset, ptrint(newptr))
 
-    for dlindex, dloffset, offset in dbuf._subclassfixups:
-        print('TODO: subclass fixup for offset %r' % offset)
-
     # Experimental: Mark objects as tracked.
     # for gcoffset in dbuf._gcoffsets:
     #     print('Write GC offset %d' % gcoffset)
@@ -2882,6 +2884,18 @@ def load(offsets=pos, raw=False, dbuf=None):
             result.append(ptr)
         else:
             lib.PyList_Append(resultptr, cast("PyObject *", offset + bufstart))
+
+    for dlindex, dloffset, offset in dbuf._subclassfixups:
+        addr = dlbase(dbuf._dlnames[dlindex]) + dloffset
+        baseptr = cast('PyTypeObject *', addr)
+        assert baseptr.ob_type == lib.PyType_Type
+        # Add "offset" to that baseptr
+        assert baseptr.tp_subclasses != ffi.NULL
+        ptr = cast("PyObject *", offset + bufstart)
+        ref = lib.PyWeakref_NewRef(ptr, ffi.NULL)
+        lib.PyList_Append(baseptr.tp_subclasses, ref)
+        # print('TODO: subclass fixup for offset %r' % offset)
+
     return result
 
 
