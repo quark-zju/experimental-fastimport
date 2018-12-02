@@ -22,8 +22,12 @@ codegen(dbuf=osbuf, modname="preloados")
 # imports "os".
 
 modnames = [
-    # # hg modules
+    "ConfigParser",
+    "encodings.ascii",
+    "encodings.utf_8",
+    # hg modules
     "hgdemandimport",
+    "threading",
     "hgdemandimport.demandimportpy2",
     "mercurial",
     "mercurial.extensions",
@@ -195,11 +199,7 @@ modnames = [
     "hgext.undo",
     "mercurial.statprof",
     "hgext.infinitepushbackup",
-    "ConfigParser",
     "hgext.fastannotate.support",
-    "encodings.ascii",
-    "encodings.utf_8",
-    "uuid",
 ]
 
 
@@ -231,16 +231,26 @@ uuid._uuid_generate_random = None
 uuid.lib = None
 
 
+def noop():
+    pass
+
+
+func = type(noop)
+
+# Redefine with empty globals
+noop = func(noop.func_code, {})
+
+
 db = c.DynamicBuffer(
     evalcode=[
         # Those are printed by "python -Sc 'import sys; print(sys.modules.keys())'". encodings.utf_8 ?
-        "[sys.modules[k] for k in ['zipimport', 'encodings.__builtin__', '_codecs', 'signal', 'encodings', 'encodings.codecs', '__builtin__', 'sys', 'encodings.aliases', 'exceptions', 'encodings.encodings', '_warnings', 'codecs']]",
+        "[sys.modules[k] for k in ['zipimport', '_codecs', 'signal', 'encodings', '__builtin__', 'sys', 'encodings.aliases', 'exceptions', '_warnings', 'codecs']]",
         "[sys, sys.stdin, sys.stdout, sys.stderr, sys.modules, sys.argv, os, os.environ]",
         # non-builtin native modules
         "importnative('_ctypes', '/usr/lib64/python2.7/lib-dynload/_ctypes.so')",
+        "[v for k, v in sorted(_ctypes.__dict__.items()) if v and not isinstance(v, (dict, str, int))]",
         "importnative('_collections', '/usr/lib64/python2.7/lib-dynload/_collectionsmodule.so')",
-        "_ctypes.__dict__.values()",
-        "_collections.__dict__.values()",
+        "[_collections.deque, _collections.defaultdict]",
     ],
     replaces=[
         (ctypes.memmove, None),
@@ -254,7 +264,7 @@ db = c.DynamicBuffer(
         (ctypes._c_functype_cache, {}),
         (atexit._exithandlers, []),
         (threading._active, {}),
-        (threading._shutdown, id),
+        (threading._shutdown, noop),
     ],
 )
 

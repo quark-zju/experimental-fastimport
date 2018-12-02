@@ -1,0 +1,49 @@
+#!/usr/bin/python2 -S
+
+# Those are cheap to import
+import imp, posix, sys
+
+preloados = imp.load_dynamic("preloados", "/home/quark/fastimport/preloados.so")
+preloadhg = imp.load_dynamic("preloadhg", "/home/quark/fastimport/preloadhg.so")
+
+debug = "PRELOADDEBUG" in posix.environ
+preloados.setdebug(debug)
+preloadhg.setdebug(debug)
+
+# Import os.pyc and its dependencies.
+# "import os" 4ms vs preloados.so 1ms.
+sys.modules.update(preloados.modules())
+
+# Now it's fast to import os.
+import os
+
+# posix is builtin, faster to import
+sys.modules.update(preloadhg.modules())
+
+# The GC module imports "time".
+# Now it's fast to import gc because "time" is loaded.
+import gc
+
+gc.disable()
+gc.enable = gc.disable
+
+# Restore important states
+import threading
+
+threading._shutdown = threading._MainThread()._exitfunc
+
+# XXX: Fix this
+libdir = "/home/quark/fbcode-sparse/scm/hg"
+sys.path.insert(0, libdir)
+
+# Reapply side effects caused by mercurial modules
+os.stat_float_times(False)
+
+# Start hg
+from mercurial import encoding, dispatch
+
+# Re-parse environments
+encoding.setup()
+
+# Run
+dispatch.run()

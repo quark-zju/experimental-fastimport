@@ -1,11 +1,16 @@
+import sys, preloados
+sys.modules.update(preloados.modules())
+
 import os, sys, preloadhg
 
-# sys.modules.update(preloadhg.modules())
+# preloadhg.setdebug(1)
+sys.modules.update(preloadhg.modules())
+print('pid %s' % os.getpid())
 
 import gc
 gc.disable()
 
-import threading
+# import threading
 # threading._shutdown = threading._MainThread()._exitfunc
 
 # import code

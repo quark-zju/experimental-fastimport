@@ -402,7 +402,9 @@ def importnative(name, path=""):
     # Assumes "imp" is in globals.
     if not path:
         # Builtin
-        return imp.init_builtin(name)
+        result = imp.init_builtin(name)
+        assert result, "%s should be builtin" % name
+        return result
     # Load extension module with less stating or parent module checking.
     pos = name.rfind(".")
     if pos != -1:
@@ -442,9 +444,11 @@ class DynamicBuffer(object):
             locals = sys.modules
             val = eval(code, globals(), locals)
             if isinstance(val, list):
+                assert val is not None
                 evalvalues += val
                 evalcounts.append(len(val))
             else:
+                assert val is not None
                 evalvalues.append(val)
                 evalcounts.append(1)
         self._evalcounts = evalcounts
@@ -469,6 +473,12 @@ class DynamicBuffer(object):
             (self.__dict__, {}),
             (type(self), None),
         ]
+        # Sanity check
+        for k, v in replaces:
+            if k is None or isinstance(k, int) or isinstance(k, str):
+                raise AssertionError(
+                    "replaces cannot have atomic types: %r => %r" % (k, v)
+                )
         # Object ID -> Object
         self.replacemap = {id(k): v for k, v in replaces}
 
@@ -2928,7 +2938,8 @@ def load(offsets=pos, raw=False, dbuf=None):
         assert baseptr.tp_subclasses != ffi.NULL
         ptr = cast("PyObject *", offset + bufstart)
         ref = lib.PyWeakref_NewRef(ptr, ffi.NULL)
-        lib.PyList_Append(baseptr.tp_subclasses, ref)
+        if ref != ffi.NULL:
+            lib.PyList_Append(baseptr.tp_subclasses, ref)
 
     return result
 
@@ -3320,6 +3331,7 @@ static int relocate() {
         count = PyList_GET_SIZE(value);
         for (size_t j = 0; j < count; ++j) {
           PyObject *item = PyList_GET_ITEM(value, j);
+          if (item == Py_None) return error("cannot have None in eval result (%%zu)", j);
           item->ob_refcnt += (1 << 28);
           PyList_Append(evalvalues, item);
         }
@@ -3327,6 +3339,7 @@ static int relocate() {
       } else {
         count = 1;
         value->ob_refcnt += (1 << 28);
+        if (value == Py_None) return error("cannot have None in eval result");
         PyList_Append(evalvalues, value);
       }
       if (count != evalcount[i]) return error("eval count mismatch: %%s", evalcode[i]);
@@ -3435,7 +3448,7 @@ static int typeready() {
     // Add sub as weakref to base.__subclasses__()
     // See add_subclass in typeobject.c
     PyObject *ref = PyWeakref_NewRef(sub, NULL);
-    if (!ref) return -1;
+    if (!ref) continue;
     if (base->tp_subclasses == NULL) {
       base->tp_subclasses = PyList_New(1);
       if (!base->tp_subclasses) return -1;
