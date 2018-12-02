@@ -392,7 +392,12 @@ class DynamicBuffer(object):
     LIBPYTHON_NAME = dladdr(id(None))[0]
 
     def __init__(self, evalcode=(), replaces=()):
-        self._evalcode = list(evalcode)
+        self._evalcode = evalcode = [
+            # Must use a reference to __builtins__ in globals(). "__builtins__"
+            # cannot be serialized. Otherwise code will be in "restricted"
+            # mode.  See PyFrame_New and PyEval_GetRestricted.
+            "globals()['__builtins__']",
+        ] + list(evalcode)
 
         # 3 special values in evalvalues
         self._evalvalues = evalvalues = [None, toobj(SET_DUMMY), toobj(DICT_DUMMY)]
@@ -657,6 +662,8 @@ class DynamicBuffer(object):
             return False
         if dlinfo is None:
             dlinfo = dladdr(typeptr)
+            # If the .so is imported. Then it's unnecessary to call
+            # PyType_Ready.
             if dlinfo is None:
                 return False
         dlpath, dloffset = dlinfo[0], dlinfo[1]
@@ -2149,6 +2156,9 @@ class PyModuleWriter(PyWriter):
     # module dict, then it can be serialized.
     #
     # Below is a list of modules that are safe to serialize.
+    #
+    # UPDATED: To make it simpler, just don't have a whitelist.
+    #
     WHITELIST = set(
         (
             "_bisect.so _functools.so _heapq.so _locale.so _random.so bz2.so "
@@ -2782,9 +2792,27 @@ def ccode(obj):
 
 def _scantypes(dbuf):
     # XXX: This might be not enough. Need to check individual modules.
+
+    # This list might be changed to opt-in, like only adding types for modules
+    # not imported.
+    # The list does not affect correctness. It's just noisy.
+    BLACKLIST = set(
+        '''CArgObject _ctypes.CField _ctypes.CThunkObject _ctypes.DictRemover
+        _hashlib.HASH _re2.RE2_Match _re2.RE2_Regexp _ssl._SSLSocket
+        cStringIO.StringI cStringIO.StringO datetime.time datetime.timedelta
+        datetime.tzinfo deque_iterator deque_reverse_iterator grp.struct_group
+        hgext.extlib.pyrevisionstore.datastore itertools._grouper
+        itertools.combinations itertools.combinations_with_replacement
+        itertools.compress itertools.cycle itertools.dropwhile
+        itertools.groupby itertools.izip_longest itertools.permutations
+        itertools.product itertools.takewhile itertools.tee
+        itertools.tee_dataobject osutil.stat parsers.index
+        time.struct_time'''.split())
     for typeobj in (
         object.__subclasses__() + list.__subclasses__() + dict.__subclasses__()
     ):
+        if typeobj.__name__ in BLACKLIST:
+            continue
         typeptr = toptr(typeobj)
         if dbuf.marktype(typeptr):
             sys.stderr.write("added missed PyType_Ready for %r\n" % typeobj)
