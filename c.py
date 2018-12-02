@@ -2986,7 +2986,7 @@ def codegen(dbuf=None, objoffset=None, modname="preload", mmapat=0x2D0000000):
 // The extra 8192 bytes makes it possible to move buf around.
 static uint8_t buf[%(bufsize)s + 8192] BUFATTR = %(buf)s;
 
-static const size_t bufoffsets[] = { %(bufoffsets)s };
+static const uint32_t bufoffsets[] = { %(bufoffsets)s };
 static const char *dlpathsyms[%(dlcount)d][2] = { %(dlpathsyms)s };
 static const size_t dloffsets[][2] = { %(dloffsets)s };
 static const size_t reallocinfo[][2] = { %(realloc)s };
@@ -3204,6 +3204,7 @@ static int relocate() {
   if (remapped) {
     debug("relocate: skip rewriting buf pointers");
   } else {
+    #pragma omp parallel for
     for (size_t i = 0; i < len(bufoffsets); ++i) {
       size_t *ptr = (size_t *)(bufstart + bufoffsets[i]);
       size_t value = (*ptr) + (size_t)bufstart - (size_t)mmapat;
