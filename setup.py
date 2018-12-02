@@ -7,14 +7,14 @@ setup(
         Extension(
             "preload",
             sources=["preload.c"],
-            extra_compile_args=["-g", "-march=native", "-std=c99"],
-            extra_link_args=[],
+            extra_compile_args=["-g", "-std=c99", "-O3", "-fopenmp"],
+            extra_link_args=["-lgomp"],
         ),
         Extension(
             "foo",
             sources=["foo.c"],
-            extra_compile_args=["-g", "-march=native", "-std=c99"],
-            extra_link_args=[],
+            extra_compile_args=["-g", "-std=c99", "-O3", "-fopenmp"],
+            extra_link_args=["-lgomp"],
         ),
     ]
 )
