@@ -395,6 +395,29 @@ def _dummies():
     return setdummy, dictdummy
 
 
+import imp
+
+def importnative(name, path):
+    # Assumes "imp" is in globals.
+    if not path:
+        # Builtin
+        return imp.init_builtin(name)
+    # Load extension module with less stating or parent module checking.
+    pos = name.rfind('.')
+    if pos != -1:
+        pname = name[:pos]
+        sys = imp.init_builtin('sys')
+        modules = sys.modules
+        if pname not in modules:
+            modules[pname] = type(sys)(pname)
+            result = imp.load_dynamic(name, path)
+            del modules[pname]
+            return result
+    return imp.load_dynamic(name, pname)
+
+#lib._PyImport_LoadDynamicModule('hgext.extlib.linelog', path, ffi.cast('PyFileObject*', id(f)).f_fp)
+
+
 class DynamicBuffer(object):
     """Buffer with relocate ability"""
 
@@ -405,7 +428,7 @@ class DynamicBuffer(object):
             # Must use a reference to __builtins__ in globals(). "__builtins__"
             # cannot be serialized. Otherwise code will be in "restricted"
             # mode.  See PyFrame_New and PyEval_GetRestricted.
-            "globals()['__builtins__']"
+            "__builtins__"
         ] + list(evalcode)
 
         # 3 special values in evalvalues
@@ -414,7 +437,8 @@ class DynamicBuffer(object):
 
         evalcounts = []
         for code in evalcode:
-            val = eval(code)
+            locals = sys.modules
+            val = eval(code, globals(), locals)
             if isinstance(val, list):
                 evalvalues += val
                 evalcounts.append(len(val))
@@ -2333,14 +2357,12 @@ class PyModuleWriter(PyWriter):
                 # Try this whitelist?
                 if os.path.basename(path) not in self.WHITELIST:
                     needautofix = True
-        # find the name of the module
+        # Insert a "eval" that imports the module
         if needautofix:
             name = getattr(mod, "__name__", None)
             if name:
                 sys.stderr.write("   AUTOFIX module %r - added to eval list\n" % name)
-                code = "__import__(%r)" % name
-                if "." in name:
-                    code = "%s.%s" % (code, ".".join(name.split(".")[1:]))
+                code = "importnative(%r, %r)" % (name, path)
                 self.dbuf.appendevalcode(code, mod)
                 existed = True
             else:
@@ -2996,6 +3018,8 @@ def _scantypes(dbuf):
 
 
 def codegen(dbuf=None, objoffset=None, modname="preload", mmapat=0x2D0000000):
+    import marshal
+
     if dbuf is None:
         dbuf = db
     if not dbuf.ptrmap:
@@ -3039,12 +3063,16 @@ def codegen(dbuf=None, objoffset=None, modname="preload", mmapat=0x2D0000000):
         dbuf._dloffsetset & dbuf._symoffsetset
     ), "Offset adjustments should not overlap"
 
+    # evalcode, in compiled form
+    compiledevalcode = [marshal.dumps(compile(code, "<evalcode[%d]>" % i, "eval")) for i, code in enumerate(dbuf._evalcode)]
+
     # sorted(set(path for _i, path in dbuf._dloffsets))
     assert modname.isalnum()
     with open("%s.c" % modname, "w") as f:
         f.write(
             r"""
 #include "Python.h"
+#include "marshal.h"
 #include "pythread.h"
 #include <dlfcn.h>
 #include <errno.h>
@@ -3081,6 +3109,11 @@ static const size_t pylocks[] = %(pylocks)s;
 static const size_t pytypes[][2] = %(pytypes)s;
 static const size_t pymods[] = %(pymods)s;
 static const size_t subclassfixups[][3] = %(subclassfixups)s;
+
+// Marshal-ed PyCodeObjects
+static char compiledimportnative[] = %(compiledimportnative)s;
+static char compiledevalcode[][%(compiledevalcodemaxlen)s] = %(compiledevalcode)s;
+static const size_t compiledevalcodelen[] = %(compiledevalcodelen)s;
 
 static uint8_t *mmapat = (uint8_t *) %(mmapat)s;
 static uint8_t *bufstart = NULL;
@@ -3247,12 +3280,34 @@ static int relocate() {
     PyList_Append(evalvalues, dictdummy);
 
     PyObject *globals = PyEval_GetGlobals();
-    PyObject *locals = PyEval_GetLocals();
+    PyObject *locals = PyImport_GetModuleDict();
     if (!evalvalues || !globals || !locals) return error("cannot allocate eval environments");
+
+    // Prepare "imp", used by "importnative"
+    if (!PyDict_GetItemString(globals, "imp")) {
+    // "import imp"
+      PyObject *impmod = PyImport_ImportModule("imp");
+      if (!impmod) return -1;
+      if (PyDict_SetItemString(globals, "imp", impmod)) return error("cannot set imp to globals");
+    }
+
+    // Prepare the "importnative" function
+    if (!PyDict_GetItemString(globals, "importnative")) {
+      // -1: remove "\0" added by the C compiler
+      PyObject *code = PyMarshal_ReadObjectFromString(compiledimportnative, sizeof(compiledimportnative) - 1);
+      if (!code) return error("cannot read code");
+      PyObject *func = PyFunction_New(code, globals);
+      if (!func) return error("cannot create importnative function");
+      if (PyDict_SetItemString(globals, "importnative", func)) return error("cannot set importnative to globals");
+    }
+
+    // Evalulate code!
+    assert(len(evalcode) == len(compiledevalcode));
     for (size_t i = 0; i < len(evalcode); ++i) {
-      const char *code = evalcode[i];
-      debug("relocate:   evaluating %%s", code);
-      PyObject *value = PyRun_String(code, Py_eval_input, globals, locals);
+      debug("relocate:   evaluating %%s", evalcode[i]);
+      PyObject *code = PyMarshal_ReadObjectFromString(compiledevalcode[i], compiledevalcodelen[i]);
+      if (!code) return error("cannot read evalcode %%zu", i);
+      PyObject *value = PyEval_EvalCode((PyCodeObject *)code, globals, locals);
       if (!value) return -1;
       size_t count = 1;
       if (PyList_CheckExact(value)) {
@@ -3268,7 +3323,7 @@ static int relocate() {
         value->ob_refcnt += (1 << 28);
         PyList_Append(evalvalues, value);
       }
-      if (count != evalcount[i]) return error("eval count mismatch: %%s", code);
+      if (count != evalcount[i]) return error("eval count mismatch: %%s", evalcode[i]);
     }
 
     // Keep them referenced. So GC would not collect them. (??)
@@ -3289,7 +3344,7 @@ static int relocate() {
   if (remapped) {
     debug("relocate: skip rewriting buf pointers");
   } else {
-    #pragma omp parallel for
+    // #pragma omp parallel for
     for (size_t i = 0; i < len(bufoffsets); ++i) {
       size_t *ptr = (size_t *)(bufstart + bufoffsets[i]);
       size_t value = (*ptr) + (size_t)bufstart - (size_t)mmapat;
@@ -3513,6 +3568,11 @@ PyMODINIT_FUNC init%(modname)s(void) {
                 "mmapat": mmapat,
                 "bufsize": ccode(len(dbuf._buf)),
                 "subclassfixups": ccode(dbuf._subclassfixups),
+
+                "compiledevalcode": ccode(compiledevalcode),
+                "compiledevalcodelen": ccode(map(len, compiledevalcode)),
+                "compiledevalcodemaxlen": ccode(max(map(len, compiledevalcode)) + 1),
+                "compiledimportnative": ccode(marshal.dumps(importnative.func_code)),
             }
         )
 
