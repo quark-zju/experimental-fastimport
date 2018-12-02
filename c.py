@@ -396,7 +396,7 @@ class DynamicBuffer(object):
             # Must use a reference to __builtins__ in globals(). "__builtins__"
             # cannot be serialized. Otherwise code will be in "restricted"
             # mode.  See PyFrame_New and PyEval_GetRestricted.
-            "globals()['__builtins__']",
+            "globals()['__builtins__']"
         ] + list(evalcode)
 
         # 3 special values in evalvalues
@@ -437,11 +437,11 @@ class DynamicBuffer(object):
         self.replacemap = {id(k): v for k, v in replaces}
 
         # Main buffer
-        self._buf = bytearray(b'__DBUF_START_MARK__')
+        self._buf = bytearray(b"__DBUF_START_MARK__")
         # Real address -> Local offset (ex. Already serialized objects)
         self.ptrmap = {}
         # Track "uninitialized" range
-        self._initialized = bytearray(b'1' * len(self._buf))
+        self._initialized = bytearray(b"1" * len(self._buf))
 
         # Pointers (related to buf start) needed to be rewritten.
         # Need to add buffer start address
@@ -713,8 +713,10 @@ class DynamicBuffer(object):
         except ValueError:
             dlindex = len(self._dlnames)
             self._dlnames.append(dlpath)
-            if 'cffi_backend' in dlpath:
-                    import IPython; IPython.embed()
+            if "cffi_backend" in dlpath:
+                import IPython
+
+                IPython.embed()
         self._dloffsetset.add(offset)
         self._dloffsets.append((offset, dlindex))
 
@@ -1377,6 +1379,7 @@ class PyTupleWriter(PyWriter):
             ),
         ]
 
+
 class PyFrameWriter(PyWriter):
     TYPENAME = "PyFrameObject *"
 
@@ -2003,7 +2006,7 @@ class PyWeakReferenceWriter(PyWriter):
         self.DEFERREDWRITES.append(lambda: self.writefixup(newptr))
 
     def writefixup(self, newptr):
-        self.dbuf.writeweakrefptr(newptr.fieldptr("wr_object"), self.ptr)
+        self.dbuf.writeweakrefptr(newptr.fieldptr("wr_object"), self.ptr.wr_object)
 
     def pyfields(self):
         # By default, write NULL as "wr_object" so we won't serializing too
@@ -2797,7 +2800,7 @@ def _scantypes(dbuf):
     # not imported.
     # The list does not affect correctness. It's just noisy.
     BLACKLIST = set(
-        '''CArgObject _ctypes.CField _ctypes.CThunkObject _ctypes.DictRemover
+        """CArgObject _ctypes.CField _ctypes.CThunkObject _ctypes.DictRemover
         _hashlib.HASH _re2.RE2_Match _re2.RE2_Regexp _ssl._SSLSocket
         cStringIO.StringI cStringIO.StringO datetime.time datetime.timedelta
         datetime.tzinfo deque_iterator deque_reverse_iterator grp.struct_group
@@ -2807,7 +2810,8 @@ def _scantypes(dbuf):
         itertools.groupby itertools.izip_longest itertools.permutations
         itertools.product itertools.takewhile itertools.tee
         itertools.tee_dataobject osutil.stat parsers.index
-        time.struct_time'''.split())
+        time.struct_time""".split()
+    )
     for typeobj in (
         object.__subclasses__() + list.__subclasses__() + dict.__subclasses__()
     ):
@@ -2818,7 +2822,7 @@ def _scantypes(dbuf):
             sys.stderr.write("added missed PyType_Ready for %r\n" % typeobj)
 
 
-def codegen(dbuf=None, objoffset=None, modname="preload", mmapat=0x2d0000000):
+def codegen(dbuf=None, objoffset=None, modname="preload", mmapat=0x2D0000000):
     if dbuf is None:
         dbuf = db
     if not dbuf.ptrmap:
@@ -2835,14 +2839,14 @@ def codegen(dbuf=None, objoffset=None, modname="preload", mmapat=0x2d0000000):
         objoffset = min(dbuf.ptrmap.values())
 
     # Append the end mark.
-    buf = bytearray(dbuf._buf) + b'__DBUF_END_MARK__';
+    buf = bytearray(dbuf._buf) + b"__DBUF_END_MARK__"
     patchbufs = [
         # Moved bytes of the buffer so "__DBUF_START_MARK__" aligns
         # with page size.
-        b'__DBUF_PATCH_SLOT_BUF_MOVED__\0\0\0\0\0\0\0\0\0\0',
+        b"__DBUF_PATCH_SLOT_BUF_MOVED__\0\0\0\0\0\0\0\0\0\0",
         # The offset of "__DBUF_START_MARK__" in the file, after
         # moved.
-        b'__DBUF_PATCH_SLOT_BUF_IN_FILE__\0\0\0\0\0\0\0\0\0\0',
+        b"__DBUF_PATCH_SLOT_BUF_IN_FILE__\0\0\0\0\0\0\0\0\0\0",
     ]
 
     # Handle mmapat
@@ -3323,5 +3327,13 @@ db = DynamicBuffer(
         # "__import__('_io').__dict__.values()",
         "__import__('_collections').__dict__.values()",
     ],
-    replaces=[(ffi, None), (lib, None), (pos, None), (PtrWriter, None), (dump, None), (load, None), (codegen, None)],
+    replaces=[
+        (ffi, None),
+        (lib, None),
+        (pos, None),
+        (PtrWriter, None),
+        (dump, None),
+        (load, None),
+        (codegen, None),
+    ],
 )

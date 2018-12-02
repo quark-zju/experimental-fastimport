@@ -242,7 +242,14 @@ dump(d, dbuf=db)
 
 print('generating code')
 codegen(dbuf=db)
+print('dump ptrmap')
 
-v = load(pos, dbuf=db)
+with open('ptrmap', 'w') as f:
+    for k, v in sorted(db.ptrmap.iteritems()):
+        f.write("%d %d\n" % (k, v))
+
+
+print('done')
+# v = load(pos, dbuf=db)
 
 __import__('IPython').embed()
