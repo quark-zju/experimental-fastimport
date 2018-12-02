@@ -181,6 +181,12 @@ modnames = [
     "hgext.treemanifest",
     "hgext.tweakdefaults",
     "hgext.undo",
+    "mercurial.statprof",
+    "hgext.infinitepushbackup",
+    "ConfigParser",
+    "hgext.fastannotate.support",
+    "encodings.ascii",
+    "encodings.utf_8",
 ]
 
 
@@ -202,13 +208,15 @@ for name in modnames:
 
 print("serializing")
 
-import ctypes, ctypes._endian, os, sys
+import ctypes, ctypes._endian, os, sys, uuid
 import atexit, threading
 
-# import uuid - uuid is no longer used
-# uuid._UuidCreate = None
-# uuid._uuid_generate_time = None
-# uuid.lib = None
+# import uuid
+uuid._UuidCreate = None
+uuid._uuid_generate_time = None
+uuid._uuid_generate_random = None
+uuid.lib = None
+
 
 db = c.DynamicBuffer(
     evalcode=[
