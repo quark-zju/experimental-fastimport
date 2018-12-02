@@ -249,18 +249,31 @@ func = type(noop)
 # Redefine with empty globals
 noop = func(noop.func_code, {})
 
+evalcode = [
+    # Those are printed by "python -Sc 'import sys; print(sys.modules.keys())'". encodings.utf_8 ?
+    "[sys.modules[k] for k in ['zipimport', '_codecs', 'signal', 'encodings', '__builtin__', 'sys', 'encodings.aliases', 'exceptions', '_warnings', 'codecs']]",
+    "[sys, sys.stdin, sys.stdout, sys.stderr, sys.modules, sys.argv, os, os.environ]",
+]
 
-db = c.DynamicBuffer(
-    evalcode=[
-        # Those are printed by "python -Sc 'import sys; print(sys.modules.keys())'". encodings.utf_8 ?
-        "[sys.modules[k] for k in ['zipimport', '_codecs', 'signal', 'encodings', '__builtin__', 'sys', 'encodings.aliases', 'exceptions', '_warnings', 'codecs']]",
-        "[sys, sys.stdin, sys.stdout, sys.stderr, sys.modules, sys.argv, os, os.environ]",
+if 'nt' in sys.modules:
+    evalcode += [
+        "__import__('_ctypes')",
+        "[v for k, v in sorted(_ctypes.__dict__.items()) if v and not isinstance(v, (dict, str, int))]",
+        "__import__('_collections')",
+        "[_collections.deque, _collections.defaultdict]",
+    ]
+else:
+    evalcode += [
         # non-builtin native modules
         "importnative('_ctypes', '/usr/lib64/python2.7/lib-dynload/_ctypes.so')",
         "[v for k, v in sorted(_ctypes.__dict__.items()) if v and not isinstance(v, (dict, str, int))]",
         "importnative('_collections', '/usr/lib64/python2.7/lib-dynload/_collectionsmodule.so')",
         "[_collections.deque, _collections.defaultdict]",
-    ],
+    ]
+
+
+db = c.DynamicBuffer(
+    evalcode=evalcode,
     replaces=[
         (ctypes.memmove, None),
         (ctypes.memset, None),

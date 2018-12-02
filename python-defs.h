@@ -7,13 +7,12 @@
 // file in its generated C code to build the actual ffi extension.
 
 // Public headers
-#include "python2.7/Python.h"
-
-#include "python2.7/datetime.h"
-#include "python2.7/frameobject.h"
-#include "python2.7/longintrepr.h"
-#include "python2.7/pythread.h"
-#include "python2.7/structmember.h"
+#include "Python.h"
+#include "datetime.h"
+#include "frameobject.h"
+#include "longintrepr.h"
+#include "pythread.h"
+#include "structmember.h"
 
 // Extracted by gen_cdef.py
 #include "python-structs.h"
