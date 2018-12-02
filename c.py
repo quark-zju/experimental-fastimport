@@ -10,7 +10,7 @@ import _cffi_backend
 
 import gc
 
-# gc.disable()
+gc.disable()
 
 addressof = ffi.addressof
 cast = ffi.cast
@@ -1370,6 +1370,12 @@ class PyTupleWriter(PyWriter):
             ),
         ]
 
+class PyFrameWriter(PyWriter):
+    TYPENAME = "PyFrameObject *"
+
+    def pyfields(self):
+        raise NotImplementedError("cannot serialize PyFrame")
+
 
 class PyListWriter(PyWriter):
     TYPENAME = "PyListObject *"
@@ -2499,6 +2505,7 @@ TYPEID_WRITE_MAP = {
     addrint(lib.PySuper_Type): "PySuperWriter",
     addrint(lib.PyTraceBack_Type): "PyTraceBackWriter",
     addrint(lib.PyTuple_Type): PyTupleWriter,
+    addrint(lib.PyFrame_Type): PyFrameWriter,
     # Types that need serialization are mostly heap types.
     addrint(lib.PyType_Type): PyHeapTypeWriter,
     addrint(lib.PyUnicode_Type): PyUnicodeWriter,
@@ -2901,6 +2908,8 @@ static int debugenabled = 0;
 static double debugstarted = 0;
 static int mmapenabled = 1;
 
+static PyObject *mod = NULL;
+
 // Timestamp if debug is enabled.
 static double now() {
   struct timeval t;
@@ -3036,15 +3045,21 @@ static int relocate() {
         count = PyList_GET_SIZE(value);
         for (size_t j = 0; j < count; ++j) {
           PyObject *item = PyList_GET_ITEM(value, j);
-          Py_INCREF(item);
+          item->ob_refcnt += (1 << 28);
           PyList_Append(evalvalues, item);
         }
         Py_DECREF(value);
       } else {
         count = 1;
+        value->ob_refcnt += (1 << 28);
         PyList_Append(evalvalues, value);
       }
       if (count != evalcount[i]) return error("eval count mismatch: %%s", code);
+    }
+
+    // Keep them referenced. So GC would not collect them. (??)
+    if (mod) {
+      PyModule_AddObject(mod, "_evalvalues", evalvalues);
     }
   }
   debug("relocate: evaluated %%zu expressions", len(evalcode));
@@ -3154,15 +3169,19 @@ static PyObject *modules() {
   if (typeready()) return NULL;
   if (bufstart == NULL) return NULL;
 
-  PyObject *list = PyList_New(len(pymods));
-  if (!list) return NULL;
+  PyObject *dict = PyDict_New();
+  if (!dict) return NULL;
   for (size_t i = 0; i < len(pymods); ++i) {
     size_t offset = pymods[i];
     PyObject *mod = (PyObject *)(bufstart + offset);
     Py_INCREF(mod);
-    PyList_SET_ITEM(list, i, mod);
+    const char *name = PyModule_GetName(mod);
+    if (!name || PyDict_SetItemString(dict, name, mod)) {
+      Py_DECREF(dict);
+      return NULL;
+    }
   }
-  return list;
+  return dict;
 }
 
 static PyObject *contains(PyObject *self, PyObject *obj) {
@@ -3201,20 +3220,35 @@ static PyObject *getpatches() {
   return list;
 }
 
+static PyObject *getevals() {
+  PyObject *list = (PyObject *)PyList_New(len(evalcode));
+  for (size_t i = 0; i < len(evalcode); ++i) {
+    PyObject *item = PyString_FromString(evalcode[i]);
+    if (!item) {
+      Py_DECREF(list);
+      return NULL;
+    }
+    PyList_SET_ITEM(list, i, item);
+  }
+  return list;
+}
+
 static PyMethodDef methods[] = {
   {"load", load, METH_NOARGS, "Extract the single top-level object"},
-  {"modules", modules, METH_NOARGS, "Extract list of modules"},
+  {"modules", modules, METH_NOARGS, "Extract all modules stored"},
   {"contains", contains, METH_O, "Test if an object is provided by this module"},
   {"setdebug", setdebug, METH_O, "Enable or disable debug prints"},
   {"setmmap", setmmap, METH_O, "Enable or disable using mmap"},
   {"_rawbuf", getrawbuf, METH_NOARGS, "Get the raw buffer"},
   {"_patches", getpatches, METH_NOARGS, "Get patched values"},
+  {"_evalcodes", getevals, METH_NOARGS, "Get embedded eval expression"},
   {NULL, NULL}
 };
 
 PyMODINIT_FUNC init%(modname)s(void) {
   bufstart = buf + readpatch(PATCH_ID_MOVED_OFFSET);
-  Py_InitModule3("%(modname)s", methods, NULL);
+  PyObject *m = Py_InitModule3("%(modname)s", methods, NULL);
+  mod = m;
 }
 """
             % {

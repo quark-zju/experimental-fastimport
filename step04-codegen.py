@@ -10,98 +10,13 @@ import sys
 
 
 modnames = [
-    # "ConfigParser",
-    # "Queue",
-    # "UserDict",
-    # "encodings",
-    # "_lsprof",
-    # "abc",
-    # 'anydbm',
-    # "array",
-    # "base64",
-    # "binascii",
-    # "bz2",
-    # "calendar",
-    # "code",
-    # "codecs",
-    # "collections",
-    # "contextlib",
-    # "copy",
-    # 'ctypes', # native _ctypes private types ...
-    # "datetime",
-    # "difflib",
-    # "email",
-    # "email.charset",
-    # "email.header",
-    # "email.message",
-    # "errno",
-    # "fcntl",
-    # "filecmp",
-    # "ftplib",
-    # "functools",
-    # "gc",
-    # "getopt",
-    # "getpass",
-    # "gettext",
-    # "glob",
-    # "grp",
-    # 'gzip', # iobase_iter not in libpython - solved
-    # "hashlib",
-    # "heapq",
-    # # 'hgdemandimport',
-    # "imp",
-    # "inspect",  # uninitialized bytes
-    # 'io', # not in libpython
-    # "itertools",
-    # "json",
-    # "locale",
-    # 'logging',
-    # 'lz4', # native
-    # "mercurial",
-    # "mimetypes",
-    # "mmap",
-    # "operator",
-    # "os",
-    # "pdb",
-    # "pkgutil",
-    # "platform",
-    # "posixpath",
-    # "pwd",
-    # 'random',
-    # "re",
-    # "resource",
-    # "select",
-    # "shlex",
-    # "shutil",
-    # "signal",
-    # 'smtplib',
-    # "socket",
-    # "ssl",
-    # "stat",
-    # "string",
-    # "struct",
-    # "subprocess",
-    # "sys",
-    # "tarfile",
-    # 'tempfile', # thread.lock incomplete write
-    # "termios",  # native
-    # "textwrap",  # segfault :/
-    # 'threading', # thread.lock
-    # "time",
-    # "traceback",
-    # "tty",
-    # "types",
-    # "unicodedata",
-    # 'uuid', # ctypes types are private ...
-    # "warnings",
-    # "weakref",
-    # "xml.dom.minidom",
-    # "zipfile", # iobase_iter
-    # "zlib",
     # # hg modules
+    "hgdemandimport",
+    "hgdemandimport.demandimportpy2",
+    "mercurial",
     "mercurial.extensions",
     "mercurial.ancestor",
-    "mercurial.archival", # gzip.GzipFile
+    "mercurial.archival",
     "mercurial.bookmarks",
     "mercurial.branchmap",
     "mercurial.bundle2",
@@ -190,6 +105,7 @@ modnames = [
     "mercurial.wireproto",
     "mercurial.worker",
     "mercurial.__version__",
+    "hgext",
     "hgext.absorb",
     "hgext.amend",
     "hgext.arcdiff", # datetime issues
@@ -283,13 +199,17 @@ for name in modnames:
 print('serializing')
 
 import ctypes, ctypes._endian, os, sys
-import atexit
+import atexit, threading
+
 # import uuid - uuid is no longer used
 # uuid._UuidCreate = None
 # uuid._uuid_generate_time = None
 # uuid.lib = None
+
 db = c.DynamicBuffer(
     evalcode=[
+        # Those are printed by "python -Sc 'import sys; print(sys.modules.keys())'".
+        "[sys.modules[k] for k in ['zipimport', 'encodings.__builtin__', '_codecs', 'signal', 'encodings', 'encodings.codecs', '__builtin__', 'encodings.utf_8', 'sys', 'encodings.aliases', 'exceptions', 'encodings.encodings', '_warnings', 'codecs']]",
         '[sys, sys.stdin, sys.stdout, sys.stderr, sys.modules, os]',
         # native modules
         "__import__('_ctypes').__dict__.values()",
@@ -306,6 +226,7 @@ db = c.DynamicBuffer(
         (ctypes._endian.LittleEndianStructure, None),
         (ctypes._c_functype_cache, {}),
         (atexit._exithandlers, []),
+        (threading._active, {}),
     ],
 )
 

@@ -8,7 +8,9 @@
 
 // Public headers
 #include "python2.7/Python.h"
+
 #include "python2.7/datetime.h"
+#include "python2.7/frameobject.h"
 #include "python2.7/longintrepr.h"
 #include "python2.7/pythread.h"
 #include "python2.7/structmember.h"
