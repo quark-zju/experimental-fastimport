@@ -1,0 +1,17 @@
+#!/bin/env python2
+
+from c import dump, load, codegen, PtrWriter, db, pos
+import subprocess
+
+print('serializing')
+dump(subprocess)
+
+print('generating code')
+codegen(modname='foo')
+
+v = load(pos)[0]
+subprocess = v
+
+proc = v.Popen(['cat'], stdin=v.PIPE, stdout=v.PIPE)
+print(proc.communicate('foo'))
+
