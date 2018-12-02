@@ -432,11 +432,11 @@ class DynamicBuffer(object):
         self._symbolmap = symbolmap
 
         # Main buffer
-        self._buf = bytearray()
+        self._buf = bytearray(b'__DBUF_START_MARK__')
         # Real address -> Local offset (ex. Already serialized objects)
         self.ptrmap = {}
         # Track "uninitialized" range
-        self._initialized = bytearray()
+        self._initialized = bytearray(b'1' * len(self._buf))
 
         # Pointers (related to buf start) needed to be rewritten.
         # Need to add buffer start address
@@ -489,21 +489,22 @@ class DynamicBuffer(object):
             end = start + size
         for i, b in enumerate(self._initialized[start:end]):
             if not b:
-                msg = "Offset %d is not initialized:\n" % i
-                # verbose debug message
-                offsettable = offsettablefunc()
-                for j in xrange(size):
-                    inited = self._initialized[j + start]
-                    if not inited:
-                        inited = "(not initialized)"
-                    else:
-                        inited = "(initialized by %c)" % inited
-                    msg += "\n %5d> %02x %s" % (j, self._buf[j + start], inited)
-                    if offsettable:
-                        symname = offsettable.get(j)
-                        if symname:
-                            msg += " (%s)" % symname
-                print(msg)
+                if size < 1024:
+                    msg = "Offset %d is not initialized:\n" % i
+                    # verbose debug message
+                    offsettable = offsettablefunc()
+                    for j in xrange(size):
+                        inited = self._initialized[j + start]
+                        if not inited:
+                            inited = "(not initialized)"
+                        else:
+                            inited = "(initialized by %c)" % inited
+                        msg += "\n %5d> %02x %s" % (j, self._buf[j + start], inited)
+                        if offsettable:
+                            symname = offsettable.get(j)
+                            if symname:
+                                msg += " (%s)" % symname
+                    print(msg)
                 raise UninitializedMemoryError("uninitialized memory")
 
     def _markinitialized(self, start, size, ch=b"i"):
@@ -2408,7 +2409,7 @@ def generatewriter(structname):
 
     A type is simple if all of its fields are like "PyObject *", "Py_ssize_t",
     etc.
-    
+
     structname is the C struct name for the instance objects.
     """
     fieldactions = []
@@ -2769,16 +2770,38 @@ def _scantypes(dbuf):
             sys.stderr.write("added missed PyType_Ready for %r\n" % typeobj)
 
 
-def codegen(dbuf=None, objoffset=None, modname="preload"):
+def codegen(dbuf=None, objoffset=None, modname="preload", mmapat=0x2d0000000):
     if dbuf is None:
         dbuf = db
     if not dbuf.ptrmap:
         raise IndexError("nothing stored in %r" % dbuf)
+
+    # Double check
+    dbuf.ensureinitialized()
+
+    # Final modifications
     _scantypes(dbuf)
     assert isinstance(dbuf, DynamicBuffer)
     if objoffset is None:
         # Pick the first object
         objoffset = min(dbuf.ptrmap.values())
+
+    # Append the end mark.
+    buf = bytearray(dbuf._buf) + b'__DBUF_END_MARK__';
+    patchbufs = [
+        # Moved bytes of the buffer so "__DBUF_START_MARK__" aligns
+        # with page size.
+        b'__DBUF_PATCH_SLOT_BUF_MOVED__\0\0\0\0\0\0\0\0\0\0',
+        # The offset of "__DBUF_START_MARK__" in the file, after
+        # moved.
+        b'__DBUF_PATCH_SLOT_BUF_IN_FILE__\0\0\0\0\0\0\0\0\0\0',
+    ]
+
+    # Handle mmapat
+    if mmapat:
+        for offset in dbuf._bufoffsets:
+            value = readrawptr(buf, offset)
+            writerawptr(buf, offset, value + mmapat)
 
     # Special offsets should not overlap
     assert not (dbuf._bufoffsetset & dbuf._dloffsetset & dbuf._symoffsetset)
@@ -2791,13 +2814,20 @@ def codegen(dbuf=None, objoffset=None, modname="preload"):
 #include "Python.h"
 #include "pythread.h"
 #include <dlfcn.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <time.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/types.h>
+#include <unistd.h>
 
-static uint8_t buf[] = %(buf)s;
+// The extra 8192 bytes makes it possible to move buf around.
+static uint8_t buf[%(bufsize)s + 8192] = %(buf)s;
 static size_t dlbases[%(dlcount)d] = { 0 };
 
 static const size_t bufoffsets[] = { %(bufoffsets)s };
@@ -2811,9 +2841,32 @@ static const size_t pylocks[] = { %(pylocks)s };
 static const size_t pytypes[][2] = { %(pytypes)s };
 static const size_t pymods[] = { %(pymods)s };
 
+static uint8_t *mmapat = (uint8_t *) %(mmapat)s;
+static uint8_t *bufstart = NULL;
+// The "useful" size for the buffer. Not sizeof(buf).
+static size_t bufsize = %(bufsize)s;
+
+// Each patchbuf string has the form: ANCHOR + "\0" + SIZE_T_VALUE
+// The ANCHOR part is for binary patching program to find
+// the location of it (to read, or write values).
+static char patchbufs[][64] = {
+  // Patched or not?
+  "__PATCH_IS_PATCHED__\0\0\0\0\0\0\0\0\0\0\0\0",
+
+  // Moved bytes of buf[] so "__DBUF_START_MARK__" aligns with page size.
+  "__PATCH_MOVED_OFFSET__\0\0\0\0\0\0\0\0\0\0\0\0",
+
+  // The offset of "__DBUF_START_MARK__" in the file, after moved.
+  "__PATCH_OFFSET_IN_FILE__\0\0\0\0\0\0\0\0\0\0\0\0",
+};
+
+const size_t PATCH_ID_IS_PATCHED = 0;
+const size_t PATCH_ID_MOVED_OFFSET = 1;
+const size_t PATCH_ID_OFFSET_IN_FILE = 2;
+
 #define error(...) (PyErr_Format(PyExc_RuntimeError, __VA_ARGS__),-1)
 #define debug(...) if (debugenabled) { \
-    fprintf(stderr, "[%(modname)s][%%lu] ", (uint64_t) clock()); \
+    fprintf(stderr, "[%(modname)s][%%4.6f] ", now() - debugstarted); \
     fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); \
     fflush(stderr); }
 #define len(X) (sizeof(X) / sizeof((X)[0]))
@@ -2823,12 +2876,77 @@ static int check() {
   if (Py_HashRandomizationFlag) {
     return error("incompatible with PYTHONHASHSEED");
   }
+  // TODO more checks?
 
   return 0;
 }
 
 /// Enable debug?
 static int debugenabled = 0;
+static double debugstarted = 0;
+
+// Timestamp if debug is enabled.
+static double now() {
+  struct timeval t;
+  gettimeofday(&t, NULL);
+  return t.tv_usec / 1e6 + t.tv_sec;
+}
+
+// Read a size_t value from the patchbuffer.
+static size_t readpatch(size_t patchid) {
+  uint8_t *p = memchr(patchbufs[patchid], 0, sizeof(patchbufs[0]));
+  size_t value = 0;
+
+  if (p) {
+    // By "+ 1", skip the separator "\0".
+    value = *((size_t *)(p + 1));
+  }
+  debug("readpatch: patchid %%zu value %%zu", patchid, value);
+  return value;
+}
+
+// Try to remap buf to mmapat. Update bufstart.
+// Return 1 if mmap-ed. 0 otherwise.
+static int remapbuf() {
+  if (!readpatch(PATCH_ID_IS_PATCHED)) {
+    debug("remapbuf: skipped - not patched");
+    return 0;
+  }
+
+  // The source of mmap cannot be an existing memory region.
+  // Look at the file. Assuming this is loaded as a library,
+  // the file path can be found via dladdr.
+  Dl_info info;
+  if (dladdr(buf, &info) == 0) {
+    debug("remapbuf: dladdr failed");
+    return 0;
+  }
+
+  // Prepare fd.
+  int fd = open(info.dli_fname, O_RDONLY);
+  if (fd < 0) {
+    debug("remapbuf: open failed");
+    return 0;
+  }
+
+  // Try mmap at the desired address.
+  size_t fileoffset = readpatch(PATCH_ID_OFFSET_IN_FILE);
+  uint8_t *p = (uint8_t *)mmap(mmapat, bufsize,
+    PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_POPULATE, fd, fileoffset);
+  close(fd);
+  if (p == MAP_FAILED) {
+    debug("remapbuf: mmap failed (errno = %%d)", errno);
+    return 0;
+  } if (p != mmapat) {
+    debug("remapbuf: mmap returned a different address");
+    munmap(p, bufsize);
+    return 0;
+  } else {
+    debug("remapbuf: mmap succeeded");
+    bufstart = p;
+    return 1;
+  }
+}
 
 /// Rewrite pointers to correct them. Return 0 on success.
 static int relocate() {
@@ -2918,35 +3036,46 @@ static int relocate() {
   // buf[] will be modified so retry this function won't work.
   ready = 2;
 
-  // Fix pointers to the buffer
-  size_t bufstart = (size_t)buf;
-  assert(sizeof(size_t) == sizeof(void *));
-  for (size_t i = 0; i < len(bufoffsets); ++i) {
-    *(size_t *)(buf + bufoffsets[i]) += bufstart;
+  // Try remap buf (if enabled)!
+  int remapped = 0;
+  if (!getenv("DISABLEMMAP")) {
+    remapped = remapbuf();
   }
-  debug("relocate: rewrote %%zu buf pointers", len(bufoffsets));
+
+  // Fix pointers to the buffer
+  assert(sizeof(size_t) == sizeof(void *));
+  if (remapped) {
+    debug("relocate: skip rewriting buf pointers");
+  } else {
+    for (size_t i = 0; i < len(bufoffsets); ++i) {
+      size_t *ptr = (size_t *)(bufstart + bufoffsets[i]);
+      size_t value = (*ptr) + (size_t)bufstart - (size_t)mmapat;
+      *ptr = value;
+    }
+    debug("relocate: rewrote %%zu buf pointers", len(bufoffsets));
+  }
 
   // Fix pointers to libraries
   for (size_t i = 0; i < len(dloffsets); ++i) {
     size_t offset = dloffsets[i][0];
     size_t dlindex = dloffsets[i][1];
     size_t base = dlbases[dlindex];
-    *(size_t *)(buf + offset) += base;
+    *(size_t *)(bufstart + offset) += base;
   }
   debug("relocate: rewrote %%zu library pointers", len(dloffsets));
 
   // Relocate PyObject pointers to eval-ed (external) objects
   for (size_t i = 0; i < len(symoffsets); ++i) {
     size_t offset = symoffsets[i];
-    size_t symid = *(size_t *)(buf + offset);
+    size_t symid = *(size_t *)(bufstart + offset);
     PyObject *value = PyList_GET_ITEM(evalvalues, symid);
-    *(PyObject **)(buf + offset) = value;
+    *(PyObject **)(bufstart + offset) = value;
   }
   debug("relocate: rewrote %%zu symbol pointers", len(symoffsets));
 
   // Re-create PyThread_type_lock
   for (size_t i = 0; i < len(pylocks); ++i) {
-    *(PyThread_type_lock *)(buf + pylocks[i]) = PyThread_allocate_lock();
+    *(PyThread_type_lock *)(bufstart + pylocks[i]) = PyThread_allocate_lock();
   }
   debug("relocate: recreated %%zu locks", len(pylocks));
 
@@ -2961,9 +3090,9 @@ static int relocate() {
       error("malloc failed");
       return -1;
     }
-    uint8_t *src = (uint8_t *)(bufstart + *((size_t *)(buf + start)));
+    uint8_t *src = (uint8_t *)(bufstart + *((size_t *)(bufstart + start)));
     memcpy(dst, src, size);
-    *(uint8_t **)(buf + start) = dst;
+    *(uint8_t **)(bufstart + start) = dst;
   }
   debug("relocate: reallocated %%zu buffers", len(reallocinfo));
 
@@ -2999,7 +3128,9 @@ static int typeready() {
 static PyObject *load() {
   if (relocate()) return NULL;
   if (typeready()) return NULL;
-  PyObject *obj = (PyObject *)(buf + %(objoffset)d);
+  if (bufstart == NULL) return NULL;
+
+  PyObject *obj = (PyObject *)(bufstart + %(objoffset)d);
   if (!obj) { PyErr_NoMemory(); return NULL; }
   Py_INCREF(obj);
   return obj;
@@ -3008,12 +3139,13 @@ static PyObject *load() {
 static PyObject *modules() {
   if (relocate()) return NULL;
   if (typeready()) return NULL;
+  if (bufstart == NULL) return NULL;
 
   PyObject *list = PyList_New(len(pymods));
   if (!list) return NULL;
   for (size_t i = 0; i < len(pymods); ++i) {
     size_t offset = pymods[i];
-    PyObject *mod = (PyObject *)(buf + offset);
+    PyObject *mod = (PyObject *)(bufstart + offset);
     Py_INCREF(mod);
     PyList_SET_ITEM(list, i, mod);
   }
@@ -3021,30 +3153,54 @@ static PyObject *modules() {
 }
 
 static PyObject *contains(PyObject *self, PyObject *obj) {
-  if ((uint8_t *)obj >= buf && (uint8_t *)obj < buf + sizeof(buf)) {
+  if ((uint8_t *)obj >= bufstart && (uint8_t *)obj < bufstart + bufsize) {
     Py_RETURN_TRUE;
   } else {
     Py_RETURN_FALSE;
   }
 }
 
+static PyObject *getrawbuf() {
+  return PyString_FromStringAndSize((const char *)buf, (Py_ssize_t)sizeof(buf));
+}
+
+static PyObject *getpatches() {
+PyObject *list = (PyObject *)PyList_New(len(patchbufs));
+  for (size_t i = 0; i < len(patchbufs); ++i) {
+    PyObject *item = Py_BuildValue("sK", patchbufs[i], (unsigned long long)readpatch(i));
+    if (!item) {
+      Py_DECREF(list);
+      return NULL;
+    }
+    PyList_SET_ITEM(list, i, item);
+  }
+  return list;
+}
+
 static PyMethodDef methods[] = {
-  {"load", load, METH_NOARGS, "Extract the single top-level object."},
-  {"modules", modules, METH_NOARGS, "Extract list of modules."},
-  {"contains", contains, METH_O, "Test if an object is provided by this module."},
+  {"load", load, METH_NOARGS, "Extract the single top-level object"},
+  {"modules", modules, METH_NOARGS, "Extract list of modules"},
+  {"contains", contains, METH_O, "Test if an object is provided by this module"},
+  {"_rawbuf", getrawbuf, METH_NOARGS, "Get the raw buffer."},
+  {"_patches", getpatches, METH_NOARGS, "Get patched values."},
   {NULL, NULL}
 };
 
 PyMODINIT_FUNC init%(modname)s(void) {
   debugenabled = (getenv("%(modnameupper)sDEBUGENABLED") != NULL);
-  debug("buf: start at %%p, %%zu bytes", buf, sizeof(buf));
+  bufstart = buf + readpatch(PATCH_ID_MOVED_OFFSET);
+  if (debugenabled) debugstarted = now();
+  debug("buf: start at %%p, %%zu bytes", bufstart, bufsize);
   Py_InitModule3("%(modname)s", methods, NULL);
 }
 """
             % {
                 "modname": modname,
                 "modnameupper": modname.upper(),
-                "buf": ccode(dbuf._buf),
+                # Append some room so the real content of the buffer
+                # can be moved to align to a page.
+                # This must be greater than the page size (4096).
+                "buf": ccode(buf),
                 "bufoffsets": ccode(sorted(dbuf._bufoffsets)),
                 "dlpathsyms": ccode(
                     [(path, dlanysymbol(path)[0]) for path in dbuf._dlnames]
@@ -3059,6 +3215,8 @@ PyMODINIT_FUNC init%(modname)s(void) {
                 "pytypes": ccode(sorted(dbuf._pytypeset)),
                 "pymods": ccode(sorted(dbuf._pymodset)),
                 "objoffset": objoffset,
+                "mmapat": mmapat,
+                "bufsize": ccode(len(dbuf._buf)),
             }
         )
 

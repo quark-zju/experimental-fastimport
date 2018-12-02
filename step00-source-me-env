@@ -1,2 +1,2 @@
-export PYTHONPATH=$PWD/deps/cffi:$PWD/deps/pycparser:$PWD:$HOME/fbcode/scm/hg
+export PYTHONPATH=$PWD/deps/cffi:$PWD/deps/pycparser:$PWD:$HOME/fbcode/scm/hg:/usr/lib64/python2.7/site-packages
 export PYTHON_SOURCE=$PWD/deps/Python-2.7.5

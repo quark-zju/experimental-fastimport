@@ -1,6 +1,7 @@
 #!/bin/env python2
 
 from c import dump, load, codegen, PtrWriter, db, pos
+import c
 import sys
 
 # Patch uuid so it does not contain a reference to an opened library (which
@@ -281,6 +282,8 @@ for name in modnames:
 
 print('serializing')
 
+
+
 # Patching
 
 import ctypes, ctypes._endian
@@ -299,10 +302,14 @@ del ctypes._endian.LittleEndianStructure
 del ctypes._endian.Structure
 del ctypes.BigEndianStructure
 del ctypes.LittleEndianStructure
-# import uuid
+# import uuid - uuid is no longer used
 # uuid._UuidCreate = None
 # uuid._uuid_generate_time = None
 # uuid.lib = None
+
+# Whitelist bser.so
+c.PyModuleWriter.WHITELIST.add("bser.so")
+
 
 #import ipdb
 # ipdb has side effect on __builtins__
