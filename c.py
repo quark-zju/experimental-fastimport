@@ -3070,6 +3070,7 @@ static const size_t symoffsets[] = %(symoffsets)s;
 static const size_t pylocks[] = %(pylocks)s;
 static const size_t pytypes[][2] = %(pytypes)s;
 static const size_t pymods[] = %(pymods)s;
+static const size_t subclassfixups[][3] = %(subclassfixups)s;
 
 static uint8_t *mmapat = (uint8_t *) %(mmapat)s;
 static uint8_t *bufstart = NULL;
@@ -3352,6 +3353,28 @@ static int typeready() {
   }
   debug("typeready: %%zu types ready", len(pytypes));
 
+  for (size_t i = 0; i < len(subclassfixups); ++i) {
+    size_t dlindex = subclassfixups[i][0];
+    size_t dloffset = subclassfixups[i][1];
+    size_t offset = subclassfixups[i][2];
+
+    PyObject *sub = (PyObject *)(bufstart + offset);
+    PyTypeObject *base = (PyTypeObject *)(dlbases[dlindex] + dloffset);
+
+    // Add sub as weakref to base.__subclasses__()
+    // See add_subclass in typeobject.c
+    PyObject *ref = PyWeakref_NewRef(sub, NULL);
+    if (!ref) return -1;
+    if (base->tp_subclasses == NULL) {
+      base->tp_subclasses = PyList_New(1);
+      if (!base->tp_subclasses) return -1;
+      PyList_SET_ITEM(base->tp_subclasses, 0, ref);
+    } else {
+      PyList_Append(base->tp_subclasses, ref);
+    }
+  }
+  debug("typeready: %%zu subclasses fixed", len(subclassfixups));
+
   ready = 1;
   debug("typeready: done");
   return 0;
@@ -3479,6 +3502,7 @@ PyMODINIT_FUNC init%(modname)s(void) {
                 "objoffset": objoffset,
                 "mmapat": mmapat,
                 "bufsize": ccode(len(dbuf._buf)),
+                "subclassfixups": ccode(dbuf._subclassfixups),
             }
         )
 
