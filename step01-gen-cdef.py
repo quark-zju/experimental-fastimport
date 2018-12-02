@@ -9,7 +9,7 @@ import subprocess
 import sys
 import tempfile
 
-PYTHON_SOURCE = os.environ.get("PYTHON_SOURCE", os.path.expanduser("~/cpython-hg"))
+PYTHON_SOURCE = os.environ.get("PYTHON_SOURCE", os.path.expanduser("~/scratch/cpython"))
 
 if not os.path.exists("%s/Include/Python.h" % PYTHON_SOURCE):
     raise RuntimeError("Please define PYTHON_SOURCE to path of the Python 2.7 source")
@@ -41,9 +41,18 @@ WANTED_STRUCTS = [
     "ffi_type",
 ]
 
+ismsvc = 'nt' in sys.modules
 
 def cpp(path=None, code=None):
-    args = ["cpp"]
+    if ismsvc:
+        args = ["cl.exe", "-E", "-I", "%s/Include" % PYTHON_SOURCE, "-I", "%s/PC" % PYTHON_SOURCE]
+        if path is None:
+            assert code
+            open('tmp.c', 'w').write(code)
+            path = 'tmp.c'
+            code = None
+    else:
+        args = ["cpp", "-I%s/Include" % PYTHON_SOURCE, "-I%s" % PYTHON_SOURCE]
     if code:
         p = subprocess.Popen(
             args + ["-"], stdin=subprocess.PIPE, stdout=subprocess.PIPE
@@ -124,6 +133,7 @@ typedef struct _ffi_type
                 header = ""
     return result
 
+parser = pycparser.CParser()
 
 def seemssupported(structcode):
     """Test if a struct contains only known typed fields"""
@@ -148,7 +158,10 @@ def seemssupported(structcode):
         # Just define them
         code += "typedef int %s;\n" % name
     code += cpp(code=structcode.replace("PyObject_HEAD", ""))
-    parser = pycparser.CParser()
+    if ismsvc:
+        # cparser cannot parse __int64
+        code = code.replace('unsigned __int64', 'uint64_t')
+        code = code.replace('__int64', 'int64_t')
     try:
         # The parser complains about unknown types.
         parser.parse(code)
@@ -165,17 +178,32 @@ def extractpythondefs(code):
     currentfile = "/"
     needuncomment = False
     newcontent = ""
-    lib = ctypes.CDLL("libpython2.7.so")
+    lib = ctypes.pythonapi
     funcre = re.compile(
-        "^\s*(?:int|void|Py[A-Za-z_]*|char|size_t|ssize_t)[ \*]+([A-Za-z0-9_]+)\("
+        "^\s*(?:extern)?\s*(?:int|void|Py[A-Za-z_]*|char|size_t|ssize_t)[ \*]+([A-Za-z0-9_]+)\("
     )
-    for line in code.splitlines(True):
+    for line in code.splitlines():
         # cpp writes file name as "#" comments. For example:
         # # 106 "object.h"
-        if line.startswith("#"):
-            currentfile = line.split()[2][1:-1]
+        # cl /e writes something like:
+        # #line 1 "object.h"
+        if line.startswith("#pragma"):
+            # cl.exe can write #pragma lines
+            continue
+        elif line.startswith("#line"):
+            # cffi cannot parse "#line line"
+            currentfile = line.split(' ', 2)[2][1:-1]
+            continue
+        elif line.startswith("#"):
+            currentfile = line.split(' ', 2)[2][1:-1]
         # Only include definitions in python
         if "python" in currentfile:
+            if ismsvc:
+                # cparser does not know __int64
+                line = line.replace('unsigned __int64', 'uint64_t')
+                line = line.replace('__int64', 'int64_t')
+                if '_PyGC_generation0' in line:
+                    line = '// %s' % line
             # Remove parts incompatible with cffi:
             # __attribute__, va_list
             if "__attribute__" in line:
@@ -183,6 +211,8 @@ def extractpythondefs(code):
                 line = line.replace("__attribute__", "/* __attribute__").replace(
                     "));", ")) */;"
                 )
+            if '__declspec' in line:
+                line = line.replace('__declspec(dllimport)', '')
             if "va_list" in line or "PyArg_VaParse" in line:
                 # Not perfect. But good enough for Python.h.
                 line = "// %s" % line
@@ -202,7 +232,7 @@ def extractpythondefs(code):
             if "sizeof" in line:
                 # Hacky. But seems enough for Python.h on x64.
                 line = line.replace("sizeof(union _gc_head_old)", "32")
-            newcontent += line
+            newcontent += line + "\n"
 
     return newcontent
 

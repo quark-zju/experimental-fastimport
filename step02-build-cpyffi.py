@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 
+import sys
+
 from cffi import FFI
 
 builder = FFI()
@@ -44,12 +46,17 @@ builder.cdef(
 #define _PyGC_REFS_UNTRACKED ...
     """)
 
+if 'nt' in sys.modules:
+    lib = 'python27'
+else:
+    lib = 'python2.7'
+
 builder.set_source(
     "cpyffi",
     """
     #include "python-defs.h"
     """,
-    libraries=["python2.7"]
+    libraries=[lib]
 )
 
 if __name__ == "__main__":
