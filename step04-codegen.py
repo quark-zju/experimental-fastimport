@@ -13,7 +13,6 @@ modnames = [
     # # hg modules
     "hgdemandimport",
     "hgdemandimport.demandimportpy2",
-    "encodings.ascii",
     "mercurial",
     "mercurial.extensions",
     "mercurial.ancestor",
@@ -213,8 +212,8 @@ import atexit, threading
 
 db = c.DynamicBuffer(
     evalcode=[
-        # Those are printed by "python -Sc 'import sys; print(sys.modules.keys())'".
-        "[sys.modules[k] for k in ['zipimport', 'encodings.__builtin__', '_codecs', 'signal', 'encodings', 'encodings.codecs', '__builtin__', 'encodings.utf_8', 'sys', 'encodings.aliases', 'exceptions', 'encodings.encodings', '_warnings', 'codecs']]",
+        # Those are printed by "python -Sc 'import sys; print(sys.modules.keys())'". encodings.utf_8 ?
+        "[sys.modules[k] for k in ['zipimport', 'encodings.__builtin__', '_codecs', 'signal', 'encodings', 'encodings.codecs', '__builtin__', 'sys', 'encodings.aliases', 'exceptions', 'encodings.encodings', '_warnings', 'codecs']]",
         "[sys, sys.stdin, sys.stdout, sys.stderr, sys.modules, sys.argv, os, os.environ]",
         # native modules
         "__import__('_ctypes').__dict__.values()",
