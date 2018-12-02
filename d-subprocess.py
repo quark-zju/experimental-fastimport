@@ -7,7 +7,7 @@ print('serializing')
 dump(subprocess)
 
 print('generating code')
-codegen(modname='foo')
+codegen([db], modname='foo')
 
 v = load(pos)[0]
 subprocess = v

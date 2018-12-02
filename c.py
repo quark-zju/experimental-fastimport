@@ -293,11 +293,14 @@ class BufferPointer(object):
             # Use more powerful writeptr to handle them.
             fieldptr.writeptr(value)
         else:
-            setfunc(value)
             # Also mark the range as initialized.
             field = self.fieldptr(name)
             start = fieldptr._offset
             size = fieldptr.size()
+            autopadding = self.paddingautofix(name)
+            if autopadding:
+                field.writeraw(b'\0' * (size + autopadding))
+            setfunc(value)
             self._dbuf._markinitialized(start, size, b"s")
 
     __setattr__ = writefield
@@ -362,6 +365,37 @@ class BufferPointer(object):
     def __repr__(self):
         return "<BufferPointer %s at %d>" % (self._typename, self._offset)
 
+    _paddingautofixcache = {}
+
+    def paddingautofix(self, fieldname):
+        key = (self._typename, fieldname)
+        if key in self._paddingautofixcache:
+            return self._paddingautofixcache[key]
+        tp = typeof(self._typename)
+        if tp.kind == "pointer":
+            tp = tp.item
+        if tp.kind == "struct":
+            thisfield = None
+            nextfield = None
+            for name, cfield in tp.fields:
+                if name == fieldname:
+                    thisfield = cfield
+                    continue
+                elif thisfield is not None:
+                    nextfield = cfield
+                    break
+            assert thisfield
+            if nextfield is None:
+                # at the struct end
+                nextoffset = sizeof(tp)
+            else:
+                nextoffset = nextfield.offset
+            padding = nextoffset - thisfield.offset - sizeof(thisfield.type)
+            assert padding >= 0
+            self._paddingautofixcache[key] = padding
+            return padding
+        else:
+            return 0
 
 def writeu32(buf, offset, value):
     buf[offset : offset + 4] = struct.pack("L", value)
@@ -1287,11 +1321,11 @@ class PyMemberDefWriter(PtrWriter):
     def writebodyat(self, newptr):
         assert self.ptr != ffi.NULL
         # padding (int)
-        newptr.fieldptr("type").writeraw(b"\0" * 8)
+        # newptr.fieldptr("type").writeraw(b"\0" * 8)
         newptr.type = self.ptr.type
         newptr.offset = self.ptr.offset
         # padding (int)
-        newptr.fieldptr("flags").writeraw(b"\0" * 8)
+        # newptr.fieldptr("flags").writeraw(b"\0" * 8)
         newptr.flags = self.ptr.flags
         cloneptr(newptr["name"], self.ptr.name)
         cloneptr(newptr["doc"], self.ptr.doc)
@@ -1307,7 +1341,7 @@ class PyMethodDefWriter(PtrWriter):
             ("ml_name", Action.CLONE_PTR),
             ("ml_meth", Action.CLONE_PTR_SHALLOW),
             # padding
-            ("ml_flags", Action.RAW, b"\0" * 8),
+            # ("ml_flags", Action.RAW, b"\0" * 8),
             ("ml_flags", Action.COPY),
             ("ml_doc", Action.CLONE_PTR),
         ]
@@ -1319,7 +1353,7 @@ class PyMethodDefWriter(PtrWriter):
     def writebodyat(self, newptr):
         ptr = self.ptr
         # padding
-        newptr.fieldptr("ml_flags").writeraw(b"\0" * 8)
+        # newptr.fieldptr("ml_flags").writeraw(b"\0" * 8)
         newptr.ml_flags = ptr.ml_flags
         cloneptr(newptr.fieldptr("ml_name"), ptr.ml_name)
         cloneptr(newptr.fieldptr("ml_doc"), ptr.ml_doc)
@@ -1645,7 +1679,7 @@ class PyCodeWriter(PyWriter):
             ("co_stacksize", Action.COPY),
             ("co_flags", Action.COPY),
             # Fix padding - there are 4 bytes between firstlineno and lnotab.
-            ("co_firstlineno", Action.RAW, b"\0" * 8),
+            # ("co_firstlineno", Action.RAW, b"\0" * 8),
             ("co_firstlineno", Action.COPY),
             ("co_code", Action.CLONE_PTR),
             ("co_consts", Action.CLONE_PTR),
@@ -1961,7 +1995,7 @@ class PyTypeWriter(PyWriter):
             # Fix padding gap between tp_version_tag (unsigned int) and nb_add.
             # tp_version_tag needs to be reassigned from Python. See
             # typeobject.c, next_version_tag.
-            ("tp_version_tag", Action.RAW, b"\0" * 8),
+            # ("tp_version_tag", Action.RAW, b"\0" * 8),
             ("tp_version_tag", Action.ASSIGN, 0),
         ]
 
@@ -2424,7 +2458,7 @@ class PatternObjectWriter(PyWriter):
             ("indexgroup", Action.CLONE_PTR),
             ("pattern", Action.CLONE_PTR),
             # padding
-            ("flags", Action.RAW, b"\0" * 8),
+            # ("flags", Action.RAW, b"\0" * 8),
             ("flags", Action.COPY),
             ("weakreflist", Action.ASSIGN, ffi.NULL),
             ("codesize", Action.COPY),
@@ -2473,7 +2507,7 @@ class StructFormatDefWriter(PtrWriter):
     def fields(self):
         return [
             # padding
-            ("format", Action.RAW, b"\0" * 8),
+            # ("format", Action.RAW, b"\0" * 8),
             ("format", Action.COPY),
             ("size", Action.COPY),
             ("alignment", Action.COPY),
@@ -2574,7 +2608,7 @@ class CTypesStgDictWriter(PyWriter):
                 ("restype", Action.CLONE_PTR),
                 ("checker", Action.CLONE_PTR),
                 # padding
-                ("flags", Action.RAW, b"\0" * 8),
+                # ("flags", Action.RAW, b"\0" * 8),
                 ("flags", Action.COPY),
                 ("format", Action.CLONE_PTR),
                 # padding
