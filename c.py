@@ -455,7 +455,6 @@ class DynamicBuffer(object):
         # Need to add library address
         self._dlnames = []  # dynamic library names
         self._dloffsets = []  # (bufoffset, dlnameindex)
-        self._dlnameset = set()
         self._dloffsetset = set()
         # Need to resolve symbols
         self._symoffsetset = set()
@@ -618,13 +617,46 @@ class DynamicBuffer(object):
     def writeweakrefptr(self, offset, objptr):
         """If obj was stored in this buffer, write its pointer at offset.
         Otherwise do nothing. Used by weakrefs.
+
+        This is similar to writeptr. But writes None in case: 1. dlinfo
+        points to an unknown library. 2. pointer is unknown.
         """
-        mapped = self.ptrmap.get(ptrint(objptr), None)
-        if mapped is None:
-            return
-        offset = self._normalizeoffset(offset)
-        self._writerawptr(offset, mapped)
-        self._appendbufoffsets(offset)
+        with open("weaklog", "a") as f:
+            offset = self._normalizeoffset(offset)
+            pint = ptrint(objptr)
+            assert pint != 0
+            f.write("pint = %d\n" % pint)
+            assert isinstance(objptr, CFFI_TYPE)
+            # Another object serialized?
+            if pint in self.ptrmap:
+                f.write(" in ptrmap as %d\n" % self.ptrmap[pint])
+                self._writerawptr(offset, self.ptrmap[pint])
+                self._appendbufoffsets(offset)
+                return
+            if pint in self._symbolmap:
+                symbolid = self._symbolmap[pint]
+                f.write(" pint in sym map as %s\n" % symbolid)
+                self._writerawptr(offset, symbolid)
+                assert offset not in self._symoffsetset
+                self._symoffsetset.add(offset)
+                return
+            # Pointing to a KNOWN library? (ex. "dict")
+            dlinfo = dladdr(pint)
+            if dlinfo:
+                f.write(" in dl %r\n" % (dlinfo,))
+                dlpath, dloffset = dlinfo[0], dlinfo[1]
+                if dlpath in self._dlnames:
+                    f.write("  in known dl\n")
+                    self._writerawptr(offset, dloffset)
+                    self._appenddloffset(offset, dlpath)
+                    return
+            # Make the weakref dead (None)
+            f.write(" unknown\n")
+            symbolid = 0
+            assert self._evalvalues[symbolid] is None
+            self._writerawptr(offset, symbolid)
+            assert offset not in self._symoffsetset
+            self._symoffsetset.add(offset)
 
     def allocatelock(self, offset):
         offset = self._normalizeoffset(offset)
@@ -1083,6 +1115,46 @@ class PyObjectArrayWriter(PtrWriter):
         # Use cloneptr to write actual objects.
         for i in xrange(self.count):
             cloneptr(newptr[i], self.ptr[i])
+
+
+class NullTerminatedArrayWriter(PtrWriter):
+    """Write an array of struct. The array ends with an item of all 0s.
+    Useful for fields like 'formatdef *' (actually 'formatdef[n]' where n is
+    calculated).
+    """
+
+    ITEMTYPE = None
+    CLONEARGS = None
+
+    def __init__(self, ptr, dbuf, itemtype=None, itemcloneargs=None):
+        """ptr points to the start of an array"""
+        if not itemtype:
+            itemtype = self.ITEMTYPE
+        assert itemtype
+
+        # Count it
+        countptr = cast("%s *" % itemtype, ptr)
+        count = 0
+        itemsize = sizeof(itemtype)
+        while True:
+            itemptr = countptr + count
+            if ffi.buffer(itemptr, SIZEOF_VOID_P)[:] == b"\0" * SIZEOF_VOID_P:
+                count += 1
+                break
+            count += 1
+        self.count = count
+        self.itemtype = itemtype
+        self.itemcloneargs = itemcloneargs or self.CLONEARGS or {}
+        typename = "%s[%d]" % (itemtype, count)
+        ptr = cast(typename, ptr)
+        super(NullTerminatedArrayWriter, self).__init__(ptr, dbuf)
+        assert self.size() == sizeof(itemtype) * count
+
+    def writebodyat(self, newptr):
+        # Use cloneptr to write actual objects.
+        for i in xrange(self.count):
+            # Note: inline is needed (used "self.ptr + i", not "self.ptr[i]")
+            cloneptr(newptr[i], self.ptr + i, inline=True, **self.itemcloneargs)
 
 
 class SetEntryArrayWriter(PtrWriter):
@@ -2009,7 +2081,10 @@ class PyWeakReferenceWriter(PyWriter):
         self.DEFERREDWRITES.append(lambda: self.writefixup(newptr))
 
     def writefixup(self, newptr):
-        self.dbuf.writeweakrefptr(newptr.fieldptr("wr_object"), self.ptr.wr_object)
+        # Need to revert the "symbol" offset adjustment (assuming None
+        # is referred as a symbol).
+        newfieldptr = newptr.fieldptr("wr_object")
+        self.dbuf.writeweakrefptr(newfieldptr, self.ptr.wr_object)
 
     def pyfields(self):
         # By default, write None as "wr_object" so we won't serializing too
@@ -2020,7 +2095,9 @@ class PyWeakReferenceWriter(PyWriter):
         # function to fixup the object pointer after other objects have been
         # written. Then check if the object is serialized and write it if so.
         return [
-            ("wr_object", Action.ASSIGN, cast("PyObject *", id(None))),
+            # NULL is illegal for PyWeakReference. But it will be fixed up by
+            # writefixup.
+            ("wr_object", Action.ASSIGN, ffi.NULL),
             ("wr_callback", Action.CLONE_PTR),
             ("hash", Action.COPY),
             # The linked list is used to set a chain of weakrefs' wr_object to
@@ -2297,6 +2374,7 @@ class StructFormatDefWriter(PtrWriter):
 
 
 class StructFormatCodeWriter(PtrWriter):
+    # Not a PyObject
     TYPENAME = "formatcode *"
 
     def fields(self):
@@ -2307,6 +2385,12 @@ class StructFormatCodeWriter(PtrWriter):
         ]
 
 
+class StructFormatCodeArrayWriter(NullTerminatedArrayWriter):
+    # Write formatcode[]
+    ITEMTYPE = "formatcode"
+    CLONEARGS = {"wtype": StructFormatCodeWriter}
+
+
 class StructWriter(PyWriter):
     TYPENAME = "PyStructObject *"
 
@@ -2314,7 +2398,7 @@ class StructWriter(PyWriter):
         return [
             ("s_size", Action.COPY),
             ("s_len", Action.COPY),
-            ("s_codes", Action.CLONE_PTR, StructFormatCodeWriter),
+            ("s_codes", Action.CLONE_PTR, StructFormatCodeArrayWriter),
             ("s_format", Action.CLONE_PTR),
             ("weakreflist", Action.ASSIGN, ffi.NULL),
         ]
@@ -2862,9 +2946,15 @@ def codegen(dbuf=None, objoffset=None, modname="preload", mmapat=0x2D0000000):
             writerawptr(buf, offset, value + mmapat)
 
     # Special offsets should not overlap
-    assert not (dbuf._bufoffsetset & dbuf._dloffsetset), "Offset adjustments should not overlap"
-    assert not (dbuf._bufoffsetset & dbuf._symoffsetset), "Offset adjustments should not overlap"
-    assert not (dbuf._dloffsetset & dbuf._symoffsetset), "Offset adjustments should not overlap"
+    assert not (
+        dbuf._bufoffsetset & dbuf._dloffsetset
+    ), "Offset adjustments should not overlap"
+    assert not (
+        dbuf._bufoffsetset & dbuf._symoffsetset
+    ), "Offset adjustments should not overlap"
+    assert not (
+        dbuf._dloffsetset & dbuf._symoffsetset
+    ), "Offset adjustments should not overlap"
 
     sorted(set(path for _i, path in dbuf._dloffsets))
     assert modname.isalnum()
