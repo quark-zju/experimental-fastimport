@@ -752,8 +752,7 @@ class DynamicBuffer(object):
             if "cffi_backend" in dlpath:
                 raise NotImplementedError("cffi_backend shouldn't be included!")
         self._dloffsetset.add(offset)
-        dlindexobj = (dlindex << 1) | int(bool(isobj))
-        self._dloffsets.append((offset, dlindexobj))
+        self._dloffsets.append((offset, dlindex))
 
 
 # How to write types to the buffer
@@ -2780,10 +2779,8 @@ def load(offsets=pos, raw=False, dbuf=None):
     bufstart = ptrint(bufptr.ob_bytes)
     print("bufstart %x len %d" % (bufstart, len(buf)))
 
-    for offset, dlindexobj in dbuf._dloffsets:
+    for offset, dlindex in dbuf._dloffsets:
         value = dbuf._readrawptr(offset)
-        dlindex = dlindexobj >> 1
-        isobj = dlindexobj & 1
         dlpath = dbuf._dlnames[dlindex]
         base = dlbase(dlpath)
         writerawptr(buf, offset, value + base)
@@ -3218,14 +3215,10 @@ static int relocate() {
   // Fix pointers to libraries
   for (size_t i = 0; i < len(dloffsets); ++i) {
     size_t offset = dloffsets[i][0];
-    size_t dlindex = dloffsets[i][1] >> 1;
-    size_t isobj = dloffsets[i][1] & 1;
+    size_t dlindex = dloffsets[i][1];
     size_t base = dlbases[dlindex];
     size_t *ptr = (size_t *)(bufstart + offset);
     *ptr += base;
-    if (isobj) {
-      Py_INCREF((PyObject *)(*ptr));
-    }
   }
   debug("relocate: rewrote %%zu library pointers", len(dloffsets));
 
