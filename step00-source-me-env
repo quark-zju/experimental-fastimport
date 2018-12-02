@@ -1,0 +1,2 @@
+export PYTHONPATH=$PWD/deps/cffi:$PWD/deps/pycparser:$PWD
+export PYTHON_SOURCE=$PWD/deps/Python-2.7.5
