@@ -157,11 +157,13 @@ def seemssupported(structcode):
     ]:
         # Just define them
         code += "typedef int %s;\n" % name
-    code += cpp(code=structcode.replace("PyObject_HEAD", ""))
+    expanded = cpp(code=structcode.replace("PyObject_HEAD", ""))
     if ismsvc:
+        expanded = '\n'.join([l for l in expanded.splitlines() if not l.startswith('#')])
         # cparser cannot parse __int64
-        code = code.replace('unsigned __int64', 'uint64_t')
-        code = code.replace('__int64', 'int64_t')
+        expanded = expanded.replace('unsigned __int64', 'uint64_t')
+        expanded = expanded.replace('__int64', 'int64_t')
+    code += expanded
     try:
         # The parser complains about unknown types.
         parser.parse(code)
@@ -231,7 +233,11 @@ def extractpythondefs(code):
                 needuncomment = False
             if "sizeof" in line:
                 # Hacky. But seems enough for Python.h on x64.
-                line = line.replace("sizeof(union _gc_head_old)", "32")
+                if ismsvc:
+                    n = 24
+                else:
+                    n = 32
+                line = line.replace("sizeof(union _gc_head_old)", "%s" % n)
             newcontent += line + "\n"
 
     return newcontent

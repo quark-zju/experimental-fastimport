@@ -425,6 +425,9 @@ def importnative(name, path=""):
 class DynamicBuffer(object):
     """Buffer with relocate ability"""
 
+    if "nt" in sys.modules:
+        dlfcn.lib.dlrefresh()
+
     LIBPYTHON_NAME = dladdr(id(None))[0]
 
     def __init__(self, evalcode=(), replaces=()):
@@ -3600,21 +3603,24 @@ PyMODINIT_FUNC init%(modname)s(void) {
 
 # sys.stdin, out, err, modules
 # posix.environ (for environment variables)
+
+evalcode = [
+    # This makes os.environ.data consistent with the new environment
+    # "__import__('posix').environ",
+    # native modules
+    # "map(__import__, ['_ctypes', '_bsddb', 'sys', '_io', '_collections', '_socket'])",
+    "__import__('_ctypes').__dict__.values()",
+    # stdin, stdout, stderr; file object cannot be serialized
+    "[v for k, v in __import__('sys').__dict__.iteritems() if k in {'stdin', 'stdout', 'stderr', 'modules'}]",
+    # see bsddb/db.py - it reexports bsddb: exec("from ._bsddb import __version__")
+    # "__import__('_bsddb').__dict__.values()",
+    # # io.py wants a lot from _io
+    # "__import__('_io').__dict__.values()",
+    "__import__('_collections').__dict__.values()",
+]
+
 db = DynamicBuffer(
-    evalcode=[
-        # This makes os.environ.data consistent with the new environment
-        "__import__('posix').environ",
-        # native modules
-        # "map(__import__, ['_ctypes', '_bsddb', 'sys', '_io', '_collections', '_socket'])",
-        "__import__('_ctypes').__dict__.values()",
-        # stdin, stdout, stderr; file object cannot be serialized
-        "[v for k, v in __import__('sys').__dict__.iteritems() if k in {'stdin', 'stdout', 'stderr', 'modules'}]",
-        # see bsddb/db.py - it reexports bsddb: exec("from ._bsddb import __version__")
-        # "__import__('_bsddb').__dict__.values()",
-        # # io.py wants a lot from _io
-        # "__import__('_io').__dict__.values()",
-        "__import__('_collections').__dict__.values()",
-    ],
+    evalcode=evalcode,
     replaces=[
         (ffi, None),
         (lib, None),
