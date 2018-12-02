@@ -3,11 +3,23 @@
 from c import dump, load, codegen, PtrWriter, db, pos
 import c
 import sys
+import os
 
-# Patch uuid so it does not contain a reference to an opened library (which
-# has dependencies on ctypes internals. Serialization of instances of ctypes
-# types are not implemented).
+# First, serialize the "os" module. It imports a lot of pure modules.
+osbuf = c.DynamicBuffer(
+    evalcode=[
+        "map(imp.init_builtin, ('posix', 'sys', 'errno'))",
+        "posix.environ",
+        "sys.modules",
+    ],
+    replaces=[],
+)
+dump(os, dbuf=osbuf)
+codegen(dbuf=osbuf, modname="preloados")
 
+
+# Then serialize the main Mercurial module. Note that the "_io" module
+# imports "os".
 
 modnames = [
     # # hg modules
@@ -187,6 +199,7 @@ modnames = [
     "hgext.fastannotate.support",
     "encodings.ascii",
     "encodings.utf_8",
+    "uuid",
 ]
 
 
@@ -223,9 +236,11 @@ db = c.DynamicBuffer(
         # Those are printed by "python -Sc 'import sys; print(sys.modules.keys())'". encodings.utf_8 ?
         "[sys.modules[k] for k in ['zipimport', 'encodings.__builtin__', '_codecs', 'signal', 'encodings', 'encodings.codecs', '__builtin__', 'sys', 'encodings.aliases', 'exceptions', 'encodings.encodings', '_warnings', 'codecs']]",
         "[sys, sys.stdin, sys.stdout, sys.stderr, sys.modules, sys.argv, os, os.environ]",
-        # native modules
-        "__import__('_ctypes').__dict__.values()",
-        "__import__('_collections').__dict__.values()",
+        # non-builtin native modules
+        "importnative('_ctypes', '/usr/lib64/python2.7/lib-dynload/_ctypes.so')",
+        "importnative('_collections', '/usr/lib64/python2.7/lib-dynload/_collectionsmodule.so')",
+        "_ctypes.__dict__.values()",
+        "_collections.__dict__.values()",
     ],
     replaces=[
         (ctypes.memmove, None),
@@ -239,6 +254,7 @@ db = c.DynamicBuffer(
         (ctypes._c_functype_cache, {}),
         (atexit._exithandlers, []),
         (threading._active, {}),
+        (threading._shutdown, id),
     ],
 )
 
@@ -248,7 +264,7 @@ c.PyModuleWriter.WHITELIST.add("bser.so")
 dump(d, dbuf=db)
 
 print("generating code")
-codegen(dbuf=db)
+codegen(dbuf=db, modname="preloadhg")
 
 if "d" in sys.argv:
     print("dump ptrmap")
