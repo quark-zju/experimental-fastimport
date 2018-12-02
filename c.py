@@ -481,7 +481,6 @@ class DynamicBuffer(object):
 
         # Pointers (related to buf start) needed to be rewritten.
         # Need to add buffer start address
-        self._bufoffsets = []
         self._bufoffsetset = set()
         # Need to add library address
         self._dlnames = []  # dynamic library names
@@ -789,7 +788,6 @@ class DynamicBuffer(object):
     def _appendbufoffsets(self, offset):
         assert offset not in self._bufoffsetset, "Double write detected"
         self._bufoffsetset.add(offset)
-        self._bufoffsets.append(offset)
 
     def _appenddloffset(self, offset, dlpath, isobj):
         assert offset not in self._dloffsetset, "Double write detected"
@@ -2877,7 +2875,7 @@ def load(offsets=pos, raw=False, dbuf=None):
         base = dlbase(dlpath)
         writerawptr(buf, offset, value + base)
 
-    for offset in dbuf._bufoffsets:
+    for offset in sorted(dbuf._bufoffsetset):
         value = dbuf._readrawptr(offset)
         writerawptr(buf, offset, value + bufstart)
 
@@ -3053,7 +3051,7 @@ def codegen(dbuf=None, objoffset=None, modname="preload", mmapat=0x2D0000000):
 
     # Handle mmapat
     if mmapat:
-        for offset in dbuf._bufoffsets:
+        for offset in dbuf._bufoffsetset:
             value = readrawptr(buf, offset)
             writerawptr(buf, offset, value + mmapat)
 
@@ -3352,7 +3350,7 @@ static int relocate() {
   if (remapped) {
     debug("relocate: skip rewriting buf pointers");
   } else {
-    #pragma omp parallel for
+    %(ompbufoffsets)s
     for (size_t i = 0; i < len(bufoffsets); ++i) {
       size_t *ptr = (size_t *)(bufstart + bufoffsets[i]);
       size_t value = (*ptr) + (size_t)bufstart - (size_t)mmapat;
@@ -3559,7 +3557,7 @@ PyMODINIT_FUNC init%(modname)s(void) {
                 # can be moved to align to a page.
                 # This must be greater than the page size (4096).
                 "buf": ccode(buf),
-                "bufoffsets": ccode(sorted(dbuf._bufoffsets)),
+                "bufoffsets": ccode(sorted(dbuf._bufoffsetset)),
                 "dlpathsyms": ccode(
                     [(path, dlanysymbol(path)[0]) for path in dbuf._dlnames]
                 ),
@@ -3580,6 +3578,9 @@ PyMODINIT_FUNC init%(modname)s(void) {
                 "compiledevalcodelen": ccode(map(len, compiledevalcode)),
                 "compiledevalcodemaxlen": ccode(max(map(len, compiledevalcode)) + 1),
                 "compiledimportnative": ccode(marshal.dumps(importnative.func_code)),
+                "ompbufoffsets": "#pragma omp parallel for"
+                if len(dbuf._bufoffsetset) > 300000
+                else "",
             }
         )
 
