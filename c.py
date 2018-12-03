@@ -113,7 +113,7 @@ def dlanysymbol(path):
     cdll = ctypes.CDLL(path)
     shortname = os.path.basename(path).split(".")[0]
     # Some known libraries
-    if shortname == "libpython2":
+    if shortname == "libpython2" or shortname == "python27":
         candidates = ["Py_Main"]
     elif shortname == "libc":
         candidates = ["malloc"]
@@ -299,7 +299,7 @@ class BufferPointer(object):
             size = fieldptr.size()
             autopadding = self.paddingautofix(name)
             if autopadding:
-                field.writeraw(b'\0' * (size + autopadding))
+                field.writeraw(b"\0" * (size + autopadding))
             setfunc(value)
             self._dbuf._markinitialized(start, size, b"s")
 
@@ -396,6 +396,7 @@ class BufferPointer(object):
             return padding
         else:
             return 0
+
 
 def writeu32(buf, offset, value):
     buf[offset : offset + 4] = struct.pack("L", value)
@@ -539,7 +540,7 @@ class DynamicBuffer(object):
         # Need to resolve symbols
         self._symoffsetset = set()
         # Need to allocate locks
-        self._pylocks = []
+        self._pylockset = set()
         # Need to redo malloc so the region is maintained by malloc.
         self._realloc = []
         # Need PyType_Ready (native static types)
@@ -756,8 +757,8 @@ class DynamicBuffer(object):
     def allocatelock(self, offset):
         offset = self._normalizeoffset(offset)
         self._writerawptr(offset, 0)
-        assert offset not in self._pylocks
-        self._pylocks.append(offset)
+        assert offset not in self._pylockset
+        self._pylockset.add(offset)
 
     def appendevalcode(self, code, value=None):
         if value is None:
@@ -2938,7 +2939,7 @@ def load(offsets=pos, raw=False, dbuf=None):
         obj = dbuf._evalvalues[symid]
         writerawptr(buf, offset, id(obj))
 
-    for offset in dbuf._pylocks:
+    for offset in dbuf._pylockset:
         value = ptrint(lib.PyThread_allocate_lock())
         writerawptr(buf, offset, value)
 
@@ -3188,31 +3189,54 @@ def gendbuffunc(dbuf, name, funcname):
     for dlindex, dloffset in dbuf._pytypeset:
         pytypes.append((dlindex, dloffset))
 
+    bufoffsets = sorted(dbuf._bufoffsetset)
+
+    assigncode = [""]
+
+    def assign(typename, fieldname, obj):
+        if obj:
+            assigncode[
+                0
+            ] += """
+  static %(typename)s %(fieldname)s[] = %(obj)s;
+  dbuf.%(fieldname)s = ToSizedArray(%(fieldname)s);
+""" % {
+                "typename": typename,
+                "obj": ccode(obj),
+                "fieldname": fieldname,
+            }
+        else:
+            # MSVC doesn't support zero-sized static arrays
+            assigncode[
+                0
+            ] += """
+  dbuf.%(fieldname)s = SizedArray<%(typename)s> { NULL, 0 };
+""" % {
+                "typename": typename,
+                "fieldname": fieldname,
+            }
+
+    assign("uint8_t", "buf", buf)
+    assign(
+        "uint8_t",
+        "compiledimportnative",
+        list(bytearray(marshal.dumps(importnative.func_code))),
+    )
+    assign("BufOffset", "bufrelocates", sorted(dbuf._bufoffsetset))
+    assign("BufOffset", "evalrelocates", sorted(dbuf._symoffsetset))
+    assign("DlReloc", "dlrelocates", sorted(dlrelocs))
+    assign("ReallocReloc", "reallocrelocates", sorted(dbuf._realloc))
+    assign("BufOffset", "pylocks", sorted(dbuf._pylockset))
+    assign("TypeReadyFixup", "pytypes", sorted(pytypes))
+    assign("SubclassFixup", "pysubcls", sorted(pysubcls))
+    assign("BufOffset", "pymods", sorted(dbuf._pymodset))
+
     # sorted(set(path for _i, path in dbuf._dloffsets))
     return r"""
 static DynamicBuffer %(funcname)s() {
-  static uint8_t buf[] = %(buf)s;
-  static BufOffset bufoffsets[] = %(bufoffsets)s;
-  static BufOffset evaloffsets[] = %(evaloffsets)s;
-  static ReallocReloc reallocrelocs[] = %(realloc)s;
-  static DlReloc dlrelocs[] = %(dlreloc)s;
-  static BufOffset pylocks[] = %(pylocks)s;
-  static BufOffset pymods[] = %(pymods)s;
-  static SubclassFixup pysubcls[] = %(pysubcls)s;
-  static TypeReadyFixup pytypes[] = %(pytypes)s;
-  static uint8_t importnative[] = %(compiledimportnative)s;
-
   DynamicBuffer dbuf;
-  dbuf.buf = ToSizedArray(buf);
-  dbuf.bufrelocates = ToSizedArray(bufoffsets);
-  dbuf.evalrelocates = ToSizedArray(evaloffsets);
-  dbuf.dlrelocates = ToSizedArray(dlrelocs);
-  dbuf.reallocrelocates = ToSizedArray(reallocrelocs);
-  dbuf.pylocks = ToSizedArray(pylocks);
-  dbuf.pymods = ToSizedArray(pymods);
-  dbuf.pysubcls = ToSizedArray(pysubcls);
-  dbuf.pytypes = ToSizedArray(pytypes);
-  dbuf.compiledimportnative = ToSizedArray(importnative);
+
+%(assigncode)s
 
   dbuf.name = %(name)s;
   dbuf.evals = %(evals)s;
@@ -3224,20 +3248,10 @@ static DynamicBuffer %(funcname)s() {
 """ % {
         "funcname": funcname,
         "name": ccode(name),
-        "buf": ccode(buf),
-        "bufoffsets": ccode(sorted(dbuf._bufoffsetset)),
-        "evaloffsets": ccode(sorted(dbuf._symoffsetset)),
-        "dlreloc": ccode(sorted(dbuf._dloffsets)),
-        "realloc": ccode(sorted(dbuf._realloc)),
         "evals": ccode(evals),
         "dls": ccode(dls),
-        "dlrelocates": ccode(sorted(dlrelocs)),
-        "pylocks": ccode(sorted(dbuf._pylocks)),
-        "pymods": ccode(sorted(dbuf._pymodset)),
-        "pysubcls": ccode(sorted(pysubcls)),
-        "pytypes": ccode(sorted(pytypes)),
-        "compiledimportnative": ccode(list(bytearray(marshal.dumps(importnative.func_code)))),
         "objoffset": objoffset,
+        "assigncode": assigncode[0],
     }
 
 
