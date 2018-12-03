@@ -6,18 +6,22 @@ import os
 
 nt = os.name == "nt"
 
-if nt:
-    mods = [
-        Extension("foo", sources=["foo.cpp"], extra_compile_args=[], extra_link_args=[])
-    ]
-else:
-    mods = [
-        Extension(
-            "foo",
-            sources=["foo.cpp"],
-            extra_compile_args=["-g", "-std=c++14", "-O3", "-fopenmp"],
-            extra_link_args=["-lgomp"],
+mods = []
+
+for name in ["preload", "foo"]:
+    filename = name + ".cpp"
+    if not os.path.exists(filename):
+        continue
+    if nt:
+        mods.append(Extension(name, sources=[filename]))
+    else:
+        mods.append(
+            Extension(
+                name,
+                sources=[filename],
+                extra_compile_args=["-g", "-std=c++14", "-O3", "-fopenmp"],
+                extra_link_args=["-lgomp"],
+            )
         )
-    ]
 
 setup(ext_modules=mods)

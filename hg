@@ -1,24 +1,30 @@
 #!/usr/bin/python2 -S
 
 # Those are cheap to import
-import imp, posix, sys
+import imp, sys
+if 'nt' in sys.modules:
+    from nt import environ
+else:
+    from posix import environ
 
-preloados = imp.load_dynamic("preloados", "/home/quark/fastimport/preloados.so")
-preloadhg = imp.load_dynamic("preloadhg", "/home/quark/fastimport/preloadhg.so")
+# TODO: use imp.load_dynamic to avoid stats
+import preload
+# preloados = imp.load_dynamic("preloados", "/home/quark/fastimport/preloados.so")
+# preloadhg = imp.load_dynamic("preloadhg", "/home/quark/fastimport/preloadhg.so")
 
-debug = "PRELOADDEBUG" in posix.environ
-preloados.setdebug(debug)
-preloadhg.setdebug(debug)
+debug = "PRELOADDEBUG" in environ
+preload.os.setdebug(debug)
+preload.hg.setdebug(debug)
 
 # Import os.pyc and its dependencies.
 # "import os" 4ms vs preloados.so 1ms.
-sys.modules.update(preloados.modules())
+sys.modules.update(preload.os.modules)
 
 # Now it's fast to import os.
 import os
 
 # posix is builtin, faster to import
-sys.modules.update(preloadhg.modules())
+sys.modules.update(preload.hg.modules())
 
 # The GC module imports "time".
 # Now it's fast to import gc because "time" is loaded.

@@ -20,6 +20,7 @@
 #else
 #include <dlfcn.h>
 #include <unistd.h>
+static void dlrefresh(){};
 #endif
 
 #define error(...) (PyErr_Format(PyExc_RuntimeError, __VA_ARGS__), -1)

@@ -20,11 +20,11 @@ else:
     ]
 
 osbuf = c.DynamicBuffer(
+    name='os',
     evalcode=evalcode,
     replaces=[],
 )
 dump(os, dbuf=osbuf)
-codegen(dbuf=osbuf, modname="preloados")
 
 
 # Then serialize the main Mercurial module. Note that the "_io" module
@@ -255,24 +255,16 @@ evalcode = [
     "[sys, sys.stdin, sys.stdout, sys.stderr, sys.modules, sys.argv, os, os.environ]",
 ]
 
-if 'nt' in sys.modules:
-    evalcode += [
-        "__import__('_ctypes')",
-        "[v for k, v in sorted(_ctypes.__dict__.items()) if v and not isinstance(v, (dict, str, int))]",
-        "__import__('_collections')",
-        "[_collections.deque, _collections.defaultdict]",
-    ]
-else:
-    evalcode += [
-        # non-builtin native modules
-        "importnative('_ctypes', '/usr/lib64/python2.7/lib-dynload/_ctypes.so')",
-        "[v for k, v in sorted(_ctypes.__dict__.items()) if v and not isinstance(v, (dict, str, int))]",
-        "importnative('_collections', '/usr/lib64/python2.7/lib-dynload/_collectionsmodule.so')",
-        "[_collections.deque, _collections.defaultdict]",
-    ]
+# TODO: use importnative for faster imports
+evalcode += [
+    "__import__('_ctypes')",
+    "[v for k, v in sorted(_ctypes.__dict__.items()) if v and not isinstance(v, (dict, str, int))]",
+    "__import__('_collections')",
+    "[_collections.deque, _collections.defaultdict]",
+]
 
-
-db = c.DynamicBuffer(
+hgbuf = c.DynamicBuffer(
+    name='hg',
     evalcode=evalcode,
     replaces=[
         (ctypes.memmove, None),
@@ -293,10 +285,11 @@ db = c.DynamicBuffer(
 # Whitelist bser.so
 c.PyModuleWriter.WHITELIST.add("bser.so")
 
-dump(d, dbuf=db)
+dump(d, dbuf=hgbuf)
 
 print("generating code")
-codegen(dbuf=db, modname="preloadhg")
+codegen([osbuf, hgbuf], modname="preload")
+
 
 if "d" in sys.argv:
     print("dump ptrmap")
@@ -305,7 +298,7 @@ if "d" in sys.argv:
             f.write("%d %d\n" % (k, v))
 
 if "v" in sys.argv:
-    v = load(pos, dbuf=db)
+    v = load(pos, dbuf=hgbuf)
 
 print("done")
 
