@@ -916,6 +916,8 @@ class PtrWriter(object):
                 UninitializedMemoryError,
                 AttributeError,
                 KeyError,
+                TypeError,
+                AssertionError,
             ):
                 import traceback
 
@@ -929,6 +931,8 @@ class PtrWriter(object):
                     "Errors are often caused by instances of an unknown native type.\n"
                 ) % (self.typename, ptrint(self.ptr))
                 print(msg)
+                import IPython
+                IPython.embed()
                 sys.exit(-1)
             self.DEBUGSTACK.pop()
             if not self.DEBUGSTACK:
@@ -1231,22 +1235,23 @@ class NullTerminatedArrayWriter(PtrWriter):
     ITEMTYPE = None
     CLONEARGS = None
 
-    def __init__(self, ptr, dbuf, itemtype=None, itemcloneargs=None):
+    def __init__(self, ptr, dbuf, itemtype=None, itemcloneargs=None, count=None):
         """ptr points to the start of an array"""
         if not itemtype:
             itemtype = self.ITEMTYPE
         assert itemtype
 
         # Count it
-        countptr = cast("%s *" % itemtype, ptr)
-        count = 0
-        itemsize = sizeof(itemtype)
-        while True:
-            itemptr = countptr + count
-            if ffi.buffer(itemptr, SIZEOF_VOID_P)[:] == b"\0" * SIZEOF_VOID_P:
+        if count is None:
+            countptr = cast("%s *" % itemtype, ptr)
+            count = 0
+            itemsize = sizeof(itemtype)
+            while True:
+                itemptr = countptr + count
+                if ffi.buffer(itemptr, SIZEOF_VOID_P)[:] == b"\0" * SIZEOF_VOID_P:
+                    count += 1
+                    break
                 count += 1
-                break
-            count += 1
         self.count = count
         self.itemtype = itemtype
         self.itemcloneargs = itemcloneargs or self.CLONEARGS or {}
@@ -1492,7 +1497,10 @@ class PyComplexWriter(PyWriter):
     TYPENAME = "PyComplexObject *"
 
     def pyfields(self):
-        return [("cval", Action.COPY)]
+        return [
+            ("cval.imag", Action.COPY),
+            ("cval.real", Action.COPY),
+        ]
 
 
 class PyStringWriter(PyWriter):
@@ -2542,7 +2550,7 @@ class StructWriter(PyWriter):
         return [
             ("s_size", Action.COPY),
             ("s_len", Action.COPY),
-            ("s_codes", Action.CLONE_PTR, StructFormatCodeArrayWriter),
+            ("s_codes", Action.CLONE_PTR, StructFormatCodeArrayWriter, {"count": self.ptr.s_len + 1}),
             ("s_format", Action.CLONE_PTR),
             ("weakreflist", Action.ASSIGN, ffi.NULL),
         ]
@@ -2794,9 +2802,9 @@ def PyObjectDetectTypeWriter(ptr, *args, **kwargs):
     typtr = ptr.ob_type
     wtype = TYPEID_WRITE_MAP.get(ptrint(typtr), PyObjectWriter)
     if wtype is PyObjectWriter:
-        # Try to find a better writer
+        # Try to find a better writer. Must be a non-heap type.
         wtype2 = TYPENAME_WRITER_MAP.get(ffi.string(typtr.tp_name), wtype)
-        if wtype2:
+        if wtype2 and not (typtr.tp_flags & lib.Py_TPFLAGS_HEAPTYPE):
             wtype = wtype2
     if isinstance(wtype, str):
         raise NotImplementedError("%r %r %r" % (ptr, type(toobj(ptr)), wtype))
@@ -2978,7 +2986,7 @@ def load(offsets=pos, raw=False, dbuf=None):
     for dlindex, dloffset, offset in dbuf._subclassfixups:
         addr = dlbase(dbuf._dlnames[dlindex]) + dloffset
         baseptr = cast("PyTypeObject *", addr)
-        assert baseptr.ob_type == lib.PyType_Type
+        # assert baseptr.ob_type == lib.PyType_Type
         # Add "offset" to that baseptr
         assert baseptr.tp_subclasses != ffi.NULL
         ptr = cast("PyObject *", offset + bufstart)
@@ -3274,6 +3282,15 @@ evalcode = [
     # "__import__('_io').__dict__.values()",
     # "__import__('_collections').__dict__.values()",
 ]
+
+
+def noop():
+    pass
+
+
+# Redefine with empty globals
+noop = type(noop)(noop.func_code, {})
+
 
 db = DynamicBuffer(
     name="main",
