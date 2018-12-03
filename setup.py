@@ -19,7 +19,7 @@ for name in ["preload", "foo"]:
             Extension(
                 name,
                 sources=[filename],
-                extra_compile_args=["-g", "-std=c++14", "-O3", "-fopenmp"],
+                extra_compile_args=["-g", "-std=c++11", "-O3", "-fopenmp"],
                 extra_link_args=["-lgomp"],
             )
         )
