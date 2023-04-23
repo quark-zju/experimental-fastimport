@@ -23,5 +23,6 @@ The experiment was for modules used by `hg`, and was able to get 80% hg's integr
   - ASLR is annoying for performance.
   - Mmapping the serialized buffer at a fixed offset can avoid the "relative object" pointer adjustments, but is not noticably faster. Lots of pointers still need to be changed for basic types like `PyBytes_Type`. I haven't done experiments when libpython is not ASLR-ed but I guess that might help performance.
 - Correctness:
-  - `Dict[object, ...]` is a source of test failures, since `id(obj)` can change. It wasn't fixed. Ideally the usage is low and we point it out during serialization.
+  - `Dict[object, ...]` is a source of test failures, since `id(obj)` can change. It wasn't fixed.
   - `ctypes` is a pain to handle. In this implementation, pointers to libraries like `libfoo.so` are tracked as `libfoo.so+offset` and adjusted with the new `libfoo.so` location. This is general purposed for all native libraries. It worked relatively well.
+  -  Practically, if this approach needs to be productionized, the serialization probably needs to be more picky about the input and errors out on any exotic types.
